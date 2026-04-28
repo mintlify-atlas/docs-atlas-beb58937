@@ -1,0 +1,80 @@
+---
+title: "Post-processing DAAAM pipeline outputs"
+description: "Add sentence embeddings, cluster places into regions, and generate LLM-based natural language summaries for each room in the scene graph."
+---
+
+After the pipeline finishes, several post-processing steps enrich the Dynamic Scene Graph (DSG) before it is used for downstream tasks like navigation or agentic querying. The three steps are independent but must be run in order: sentence embeddings first, place clustering second, and region summaries last.
+
+<Note>
+  Run sentence embeddings before clustering places. The `cluster_places` node reads `dsg_updated.json`, which is produced by `postprocess_scene_graph.py`.
+</Note>
+
+## Sentence embeddings
+
+By default, DAAAM does not compute sentence embedding vectors during the pipeline run. Large embedding models such as `sentence-t5-xl` are difficult to load alongside the segmentation and grounding models on a single GPU. Instead, embeddings are computed post-hoc from the saved `dsg.json`.
+
+```bash
+python scripts/postprocess_scene_graph.py \
+  --data-dir output/my_run \
+  --sentence-model-name sentence-transformers/sentence-t5-xl
+```
+
+The script reads three files from `--data-dir`:
+
+- `dsg.json` — the raw scene graph from the pipeline
+- `corrections.yaml` — semantic label corrections with temporal history
+- `background_objects.yaml` — depth-filtered objects not tracked by Hydra
+
+It writes `dsg_updated.json` with sentence embedding vectors added to every object node in the graph. This file is the input to all subsequent post-processing steps.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data-dir` | *(required)* | Path to the pipeline output directory |
+| `--sentence-model-name` | `sentence-transformers/sentence-t5-xl` | Sentence transformer model to load from HuggingFace |
+
+<Note>
+  If you set `sentence_embedding_model` in the ROS 2 launch file before running the pipeline, embeddings are computed inline and this step can be skipped. That option is only practical when you have enough VRAM to hold both the grounding model and the embedding model simultaneously.
+</Note>
+
+## Cluster places
+
+Place clustering groups spatially and semantically related place nodes into room-level regions. This step is currently run post-hoc but will be integrated into the main pipeline in a future release.
+
+```bash
+ros2 launch daaam_ros cluster_places.launch.yaml \
+  data_dir:=/path/to/output/data/dir/
+```
+
+The node reads `dsg_updated.json` from `data_dir` and writes `clustered_dsg.json` to the same directory. The `clustered_dsg.json` file is the input to the region summaries step.
+
+## Region summaries
+
+Region summaries use an OpenAI model to generate natural language labels and descriptions for each room in the clustered scene graph. This is useful for human-readable map representations and for the agentic query interface.
+
+The script reads your OpenAI key from the environment — export it before running:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+```bash
+python scripts/summarize_regions.py \
+  --data-dir output/my_run \
+  --model-name gpt-5-nano \
+  --n-samples 20
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data-dir` | *(required)* | Path to the pipeline output directory containing `clustered_dsg.json` |
+| `--model-name` | `gpt-5-nano` | OpenAI model to use for structured output generation |
+| `--n-samples` | `20` | Number of objects to sample per region for the prompt |
+| `--feature-key` | `combined` | Feature type for diversity sampling: `combined` (CLIP + sentence), `clip_feature`, or `sentence_embedding_feature` |
+| `--scene-graph-file` | `clustered_dsg.json` | Scene graph filename to read from `--data-dir` |
+
+The script uses **farthest-first sampling** to select semantically diverse objects from each region. Starting from the object farthest from the mean embedding, it iteratively picks the object maximally distant from all already-selected objects. This ensures the prompt sent to the model represents the full semantic variety of the room rather than a biased subset.
+
+The script writes two output files to `--data-dir`:
+
+- `region_summaries.yaml` — YAML with label, description, and reasoning for each room
+- `clustered_dsg_with_summaries.json` — the full scene graph with summaries embedded in each room node's metadata

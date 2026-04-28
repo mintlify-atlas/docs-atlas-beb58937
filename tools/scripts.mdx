@@ -1,0 +1,214 @@
+---
+title: "Complete reference for all DAAAM command-line scripts"
+description: "Argument reference for every script in scripts/: pipeline runner, post-processing, region summarisation, visualisation, TensorRT export, and scene query."
+---
+
+The `scripts/` directory contains standalone Python scripts for every phase of the DAAAM workflow: running the pipeline without ROS 2, post-processing the scene graph, generating region summaries, visualising results, exporting models to TensorRT, and querying the scene interactively. Each script uses Click or argparse and can be run directly with `python scripts/<name>.py --help`.
+
+## run_pipeline.py
+
+Runs the full DAAAM pipeline on a local dataset without ROS 2. This is a convenience wrapper around `HydraPipelineRunner` that accepts image sequences, CODa datasets, or HM3D semantic datasets.
+
+<Warning>
+  The standalone pipeline uses Hydra Python bindings which are less actively maintained than the ROS 2 interface. If you encounter errors, prefer the ROS 2 launch files described in [Running with ROS 2](/running/ros2).
+</Warning>
+
+```bash
+python scripts/run_pipeline.py <data_path> [options]
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `data_path` | *(required)* | Path to dataset folder (image sequence) or rosbag file |
+| `--config` | | Pipeline config YAML file; uses built-in defaults if omitted |
+| `--config-overrides` | | Space-separated `key=value` overrides, e.g. `workers.num_grounding_workers=8` |
+| `--dataset-type` | `ImageSequenceDataset` | Dataset loader class: `ImageSequenceDataset`, `HM3DSemDataset`, or `CodaDataset` |
+| `--dataset-name` | | Dataset name used in output directory structure |
+| `--sam-model` | *(config value)* | SAM model path (`.pt` or `.engine`) |
+| `--agent-model-name` | *(config value)* | LLM model name for grounding |
+| `--sentence-embedding-model` | *(config value)* | Sentence embedding model name |
+| `--depth-scale` | *(config value)* | Scale factor to convert raw depth values to metres |
+| `--depth-lb` / `--depth-ub` | *(config values)* | Valid depth range in metres |
+| `--num-grounding-workers` | *(config value)* | Parallel grounding workers |
+| `--num-assignment-workers` | *(config value)* | Parallel assignment workers |
+| `--grounding-worker` | *(config value)* | Grounding backend, e.g. `dam_multi_image` |
+| `--assignment-worker` | *(config value)* | Frame selection strategy, e.g. `min_frames_max_size` |
+| `--query-interval-frames` | *(config value)* | Frames between successive grounding queries |
+| `--fps` | *(config value)* | Dataset framerate; omit for no throttling |
+| `--sequence` | | CODa sequence ID — `CodaDataset` only |
+| `--camera-id` | | CODa camera ID — `CodaDataset` only |
+| `--depth-source` | | CODa depth folder name — `CodaDataset` only |
+| `--max-frames` | | Stop after this many frames |
+| `--hydra-config-path` | *(path to default config)* | Path to Hydra integration YAML file |
+| `--output-dir` | auto-generated | Output directory; defaults to `output/out_<timestamp>/` |
+| `--save-images` | `false` | Save segmentation visualisation frames every `--save-interval` frames |
+| `--save-interval` | `100` | Frame interval for `--save-images` |
+| `--dry-run` | `false` | Load dataset and config then exit without running |
+| `--verbose` | `false` | Enable verbose logging |
+| `--no-throttle` | `false` | Disable framerate throttling (overrides `--fps`) |
+
+### Example
+
+```bash
+python scripts/run_pipeline.py /path/to/CODa \
+  --dataset-type CodaDataset \
+  --sequence 0 \
+  --hydra-config-path /path/to/daaam_ros/config/hydra_config/coda_dataset_khronos.yaml \
+  --fps 10 \
+  --output-dir output/coda_seq0
+```
+
+---
+
+## postprocess_scene_graph.py
+
+Adds sentence embedding vectors to all object nodes in the DSG and integrates `background_objects.yaml` as a `BACKGROUND_OBJECTS` layer. Run this after the pipeline finishes to prepare `dsg_updated.json` for place clustering, region summarisation, and agentic queries.
+
+```bash
+python scripts/postprocess_scene_graph.py \
+  --data-dir output/my_run \
+  --sentence-model-name sentence-transformers/sentence-t5-xl
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data-dir` | *(required)* | Output directory containing `dsg.json`, `corrections.yaml`, and `background_objects.yaml` |
+| `--sentence-model-name` | `sentence-transformers/sentence-t5-xl` | HuggingFace sentence transformer model used to compute text embeddings |
+
+Reads `dsg.json` and writes `dsg_updated.json` in the same directory. The default model (`sentence-t5-xl`) produces high-quality embeddings but requires significant VRAM. On smaller GPUs, prefer `sentence-transformers/sentence-t5-large` or `sentence-transformers/all-MiniLM-L6-v2`.
+
+---
+
+## summarize_regions.py
+
+Generates LLM-based natural-language summaries for every room node in the clustered DSG. It uses farthest-first sampling to pick a semantically diverse set of objects per region before sending them to an OpenAI model with structured output, which returns a label, description, and reasoning chain for each room.
+
+<Note>
+  This script reads `OPENAI_API_KEY` from your environment and calls the OpenAI API once per room node. Export it before running:
+
+  ```bash
+  export OPENAI_API_KEY=sk-...
+  ```
+</Note>
+
+```bash
+python scripts/summarize_regions.py \
+  --data-dir output/my_run \
+  --model-name gpt-5-nano \
+  --n-samples 20
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data-dir` | *(required)* | Output directory containing `clustered_dsg.json`, `corrections.yaml`, and `background_objects.yaml` |
+| `--model-name` | `gpt-5-nano` | OpenAI model for structured region summarisation |
+| `--n-samples` | `20` | Maximum objects to sample per region for the LLM prompt |
+| `--feature-key` | `combined` | Feature type for diversity sampling: `combined` (CLIP + sentence), `clip_feature`, or `sentence_embedding_feature` |
+| `--scene-graph-file` | `clustered_dsg.json` | Scene graph filename to read from `--data-dir` |
+
+Sampling uses a greedy farthest-first algorithm in embedding space: it starts from the object most distant from the region mean, then iteratively picks the object maximally distant from all already-selected objects. This maximises semantic diversity within the prompt budget.
+
+Writes `region_summaries.yaml` and `clustered_dsg_with_summaries.json` to `--data-dir`.
+
+---
+
+## run_static_visualizer.py
+
+Renders the Dynamic Scene Graph in the [Rerun](https://rerun.io) viewer, laying out objects, places, and rooms at configurable Z offsets so all three layers are visible simultaneously. Requires `rerun-sdk` to be installed.
+
+```bash
+python scripts/run_static_visualizer.py \
+  --dsg output/my_run/dsg_updated.json \
+  --color-map config/labels_pseudo.csv \
+  --spawn
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--dsg` | *(required)* | Path to DSG JSON file (`dsg_updated.json` or `clustered_dsg_with_summaries.json`) |
+| `--color-map` | `config/labels_pseudo.csv` | CSV file mapping semantic labels to RGB colours |
+| `--gt-dsgs` | *(none)* | Path to a ground-truth DSG JSON or directory for side-by-side comparison |
+| `--log-object-meshes` | `false` | Log individual bounding-box meshes for each object |
+| `--spawn` / `--no-spawn` | `--spawn` | Open the Rerun viewer automatically |
+| `--z-offset-objects` | `0.0` | Z offset in metres for the objects layer |
+| `--z-offset-places` | `10.0` | Z offset in metres for the traversability/places layer |
+| `--z-offset-rooms` | `20.0` | Z offset in metres for the rooms layer |
+| `--z-offset-buildings` | `40.0` | Z offset in metres for the buildings layer |
+| `--z-offset-gt` | `0.0` | Z offset in metres for ground-truth objects |
+| `--interlayer-edge-subsample` | `1` | Show every Nth interlayer edge (use higher values to reduce clutter) |
+| `--object-subsample-grid-size` | *(none)* | Spatial grid size in metres for downsampling dense object layers |
+| `--log-regions-separately` | `false` | Log each room and its traversability nodes to separate Rerun paths for independent colouring |
+
+The script keeps running after launching Rerun so the viewer stays connected. Press `Ctrl+C` to exit.
+
+---
+
+## export_fastsam_trt.py
+
+Exports a FastSAM checkpoint to a TensorRT `.engine` file for accelerated inference. The output engine is named `<model_name>-<width>x<height>.engine` and saved to `checkpoints/fastsam/`.
+
+```bash
+python scripts/export_fastsam_trt.py --model_name FastSAM-x
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--model_name` | `FastSAM-x` | Model checkpoint name; must exist at `checkpoints/fastsam/<model_name>.pt` |
+| `--imgsz` | `480 640` | Input image size as `H W` (two integers) |
+| `--half` | `false` | Export an FP16 engine |
+| `--simplify` | `false` | Simplify the intermediate ONNX graph before TensorRT conversion |
+| `--batch` | `1` | Batch size baked into the engine |
+| `--device` | `cuda:0` | CUDA device to use for the export |
+
+See [TensorRT configuration](/configuration/tensorrt) for instructions on downloading checkpoints and integrating the exported engine into the pipeline config.
+
+---
+
+## export_vanilla_clip_engine.py
+
+Exports a vanilla CLIP ViT-B/16 visual encoder (base OpenAI weights, no ReID fine-tuning) to a TensorRT `.engine` for use as the BotSort ReID backbone. The export pipeline goes PyTorch → ONNX → TensorRT. Dynamic batch sizing is enabled by default, which is required for variable-length ReID batches at inference time.
+
+```bash
+python scripts/export_vanilla_clip_engine.py --dynamic --trt-fp16
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--output-dir` | `checkpoints/reid_weights` | Directory to write `.pt`, `.onnx`, and `.engine` files |
+| `--name` | `clip_general` | Base filename for exported artefacts |
+| `--batch-size` | `128` | Maximum batch size for the TensorRT optimisation profile |
+| `--imgsz` | `256 128` | Input image size as `H W` |
+| `--device` | `0` | CUDA device for TensorRT build |
+| `--dynamic` | `true` | Enable dynamic batch sizes (required for ReID) |
+| `--trt-fp16` | `false` | Build an FP16 TensorRT engine |
+| `--workspace` | `4` | TensorRT workspace memory limit in GB |
+| `--skip-engine` | `false` | Export `.pt` and `.onnx` only, skip TensorRT |
+
+After export, reference the engine in your pipeline config:
+
+```yaml
+reid_weights: "checkpoints/reid_weights/clip_general.engine"
+reid_half: false   # CLIP requires FP32 input
+```
+
+See [TensorRT configuration](/configuration/tensorrt) for the full configuration context.
+
+---
+
+## demo_query.py
+
+Interactive REPL for asking natural-language questions about a completed scene graph using LLM tool-calling.
+
+See [Agentic scene query](/tools/agentic-query) for the full documentation, including prerequisites, argument reference, example sessions, and an explanation of the four scene-graph tools the agent uses.

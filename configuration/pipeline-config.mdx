@@ -1,0 +1,367 @@
+---
+title: "Configuring the DAAAM pipeline via YAML"
+description: "A reference for every field in PipelineConfig — segmentation, tracking, grounding, workers, depth, and scene graph settings with types and defaults."
+---
+
+The DAAAM pipeline is configured through a single `PipelineConfig` dataclass defined in `src/daaam/config.py`. Every section maps directly to a nested dataclass, and all settings are readable and writable as a plain YAML file. You can load the default config, override individual fields for a run, and save the exact configuration used for reproducibility.
+
+## Loading and saving configuration
+
+Load a configuration file with:
+
+```python
+from daaam.config import PipelineConfig
+
+config = PipelineConfig.from_yaml("config/pipeline_config.yaml")
+```
+
+Save the active configuration — including any runtime overrides — back to disk:
+
+```python
+config.to_yaml("output/run_config.yaml")
+```
+
+Override individual fields at the CLI without editing the YAML file directly:
+
+```bash
+python scripts/run_pipeline.py --config-overrides grounding.query_interval_frames=120 depth.depth_ub=10.0
+```
+
+---
+
+## Segmentation (`segmentation`)
+
+Controls the segmentation model, input resolution, and mask filtering.
+
+<ParamField path="model_name" type="str" default="fastsam/FastSAM-s.pt">
+  Path to the segmentation model checkpoint. Accepts `.pt` weights or a TensorRT `.engine` file. The file extension determines which backend is used automatically. See [Models](/configuration/models) for the full list of supported checkpoints.
+</ParamField>
+
+<ParamField path="model_config_path" type="Optional[str]" default="fastsam/fastsam_config.yaml">
+  Path to a model-specific config YAML. Required for FastSAM; leave unset for SAM and SAM2 variants.
+</ParamField>
+
+<ParamField path="device" type="Optional[str]" default="null">
+  Compute device for the segmentation model (`"cuda"`, `"cpu"`, or `null` to auto-detect).
+</ParamField>
+
+<ParamField path="min_mask_region_area" type="int" default="300">
+  Minimum mask area in pixels. Masks smaller than this value are discarded before tracking. Increase on noisy sensors to reduce false positives.
+</ParamField>
+
+<ParamField path="max_mask_region_area" type="int" default="307200">
+  Maximum mask area in pixels (default is `640 * 480`). Masks larger than this value are discarded. Useful for filtering out near-full-frame background detections.
+</ParamField>
+
+<ParamField path="polygon_epsilon_factor" type="float" default="0.001">
+  Douglas-Peucker epsilon as a fraction of the mask perimeter. `0` disables polygon approximation; values in `0.001`–`0.01` are typical.
+</ParamField>
+
+<ParamField path="imgsz" type="Optional[Tuple[int, int]]" default="null">
+  Target image size as `[height, width]` passed to the model at inference time. Set to `null` for automatic sizing. **Required** when using a TensorRT `.engine` model — the engine is compiled for a fixed resolution and will error if this is not set.
+</ParamField>
+
+---
+
+## Tracking (`tracking`)
+
+Controls the BotSort tracker, ReID model, and temporal observation history.
+
+<ParamField path="device" type="Optional[str]" default="null">
+  Compute device for the tracking and ReID models (`"cuda"`, `"cpu"`, or `null` to auto-detect).
+</ParamField>
+
+<ParamField path="track_buffer" type="int" default="30">
+  Number of frames to keep a track alive after its last detection. Increase for scenes with frequent occlusions; decrease to prune lost tracks faster.
+</ParamField>
+
+<ParamField path="enable_temporal_history" type="bool" default="true">
+  When `true`, the tracker accumulates a per-track observation history used downstream by the assignment worker to select optimal keyframes.
+</ParamField>
+
+<ParamField path="reid_weights" type="str" default="checkpoints/reid_weights/clip_general.engine">
+  Path to the ReID model weights. Supports `.pt`, `.onnx`, and `.engine` (TensorRT) formats. Use `clip_general.engine` for general object scenes and `osnet_x0_25_msmt17.pt` for person-tracking scenarios.
+</ParamField>
+
+<ParamField path="with_reid" type="bool" default="true">
+  Enable ReID-based track association. Disable to fall back to IoU-only matching, which is faster but less robust across occlusions.
+</ParamField>
+
+<ParamField path="reid_half" type="bool" default="false">
+  Run ReID inference in FP16. Set to `false` when using CLIP-based ReID models, which require FP32. Set to `true` for `osnet_x0_25_msmt17.pt`.
+</ParamField>
+
+---
+
+## Grounding (`grounding`)
+
+Controls how often the pipeline queries the language model, which LLM and embedding model to use, and whether per-frame CLIP features are computed.
+
+<ParamField path="agent_model_name" type="str" default="gpt-4.1">
+  LLM used for the grounding agent. Supports any model available via LangChain: OpenAI (`gpt-4.1`, `gpt-5-mini`), Google Gemini, and Anthropic Claude variants.
+</ParamField>
+
+<ParamField path="group_prompt_file" type="str" default="config/prompt_templates/grounded_sam_prompt.txt">
+  Path to the prompt template file used when querying the LLM for semantic labels.
+</ParamField>
+
+<ParamField path="query_interval_frames" type="int" default="60">
+  Minimum number of frames between successive LLM grounding queries. Lower values produce more frequent updates at higher API cost.
+</ParamField>
+
+<ParamField path="sentence_embedding_model" type="str" default="sentence-transformers/sentence-t5-large">
+  SentenceTransformers model used to embed natural-language labels into the scene graph for downstream NaVQA retrieval.
+</ParamField>
+
+<ParamField path="enable_perframe_clip_features" type="bool" default="true">
+  When `true`, CLIP visual features are extracted for every `clip_feature_interval_frames` frames and stored on each track.
+</ParamField>
+
+<ParamField path="clip_feature_interval_frames" type="int" default="5">
+  Extract CLIP features every N frames. Only applies when `enable_perframe_clip_features` is `true`.
+</ParamField>
+
+<ParamField path="perframe_clip_model_name" type="str" default="ViT-B-16">
+  OpenCLIP model name for per-frame feature extraction.
+</ParamField>
+
+<ParamField path="perframe_clip_model_dataset" type="str" default="openai">
+  Pre-training dataset for the per-frame CLIP model. Use `"openai"` for standard CLIP weights.
+</ParamField>
+
+<ParamField path="cuda_device" type="Optional[str]" default="null">
+  GPU index to pin for grounding workers (`"0"`, `"1"`, …). `null` inherits the `CUDA_VISIBLE_DEVICES` environment variable.
+</ParamField>
+
+---
+
+## Workers (`workers`)
+
+Selects the worker implementations and parallelism for the assignment and grounding stages.
+
+<ParamField path="num_assignment_workers" type="int" default="1">
+  Number of parallel assignment workers. Increasing this can reduce latency when the assignment step is the bottleneck.
+</ParamField>
+
+<ParamField path="num_grounding_workers" type="int" default="4">
+  Number of parallel grounding workers. Each worker loads a full copy of the DAM model, so this is bounded by available GPU memory.
+</ParamField>
+
+<ParamField path="assignment_worker" type="str" default="min_frames_max_size">
+  Assignment worker strategy. Options:
+  - `min_frames_max_size` — Minimizes selected frames while maximizing object saliency using a CVXPY MIP. Requires GLPK.
+  - `min_frames` — Greedy frame minimization without saliency optimization.
+</ParamField>
+
+<ParamField path="grounding_worker" type="str" default="dam_multi_image">
+  Grounding worker backend. Currently only `dam_multi_image` is supported, which batches multiple frames into a single DAM inference call.
+</ParamField>
+
+### Assignment worker (`assignment_config`)
+
+<ParamField path="min_obs_per_track" type="int" default="6">
+  Minimum number of observations a track must have before it becomes eligible for grounding. Prevents noisy new tracks from consuming grounding budget.
+</ParamField>
+
+<ParamField path="N_masks_per_batch" type="int" default="64">
+  Maximum number of masks per assignment batch. Controls memory usage in the `min_frames` worker.
+</ParamField>
+
+<ParamField path="min_frame_margin_slack" type="int" default="1">
+  Extra slack frames added above the theoretical minimum when solving the frame selection problem. Higher values give the optimizer more freedom to pick salient frames.
+</ParamField>
+
+<ParamField path="min_mask_region_area" type="int" default="300">
+  Minimum mask area (pixels) applied inside the assignment worker, mirroring `segmentation.min_mask_region_area`.
+</ParamField>
+
+<ParamField path="max_mask_region_area" type="int" default="307200">
+  Maximum mask area (pixels) applied inside the assignment worker.
+</ParamField>
+
+<ParamField path="position_score_weight" type="float" default="0.5">
+  Weight given to object position (centrality) when scoring frame saliency. Must sum to `1.0` with `size_score_weight`.
+</ParamField>
+
+<ParamField path="size_score_weight" type="float" default="0.5">
+  Weight given to object size when scoring frame saliency. Must sum to `1.0` with `position_score_weight`.
+</ParamField>
+
+### DAM grounding worker (`dam_grounding_config`)
+
+<ParamField path="dam_model_path" type="str" default="nvidia/DAM-3B">
+  Hugging Face model ID or local path for the Describe Anything Model (DAM) checkpoint.
+</ParamField>
+
+<ParamField path="dam_conv_mode" type="str" default="v1">
+  Conversation mode passed to the DAM model. Use `"v1"` for DAM-3B.
+</ParamField>
+
+<ParamField path="dam_prompt_mode" type="str" default="focal_prompt">
+  Prompting strategy used when querying DAM. `"focal_prompt"` focuses attention on the masked object region.
+</ParamField>
+
+<ParamField path="multi_image_min_n_masks" type="Optional[int]" default="null">
+  Minimum number of masks required before triggering a multi-image batch inference call. Set to a positive integer (e.g., `32`) to enable batching; `null` disables it.
+</ParamField>
+
+<ParamField path="sentence_embedding_model_name" type="Optional[str]" default="null">
+  Override the sentence embedding model for this worker. When empty or `null`, the worker inherits `grounding.sentence_embedding_model`.
+</ParamField>
+
+<ParamField path="compute_full_image_description" type="bool" default="false">
+  When `true`, DAM also produces a description of the full scene image in addition to individual object descriptions.
+</ParamField>
+
+<ParamField path="save_grounding_images" type="bool" default="false">
+  Save annotated images showing masks used for grounding. Useful for debugging.
+</ParamField>
+
+<ParamField path="save_plain_grounding_images" type="bool" default="false">
+  Save unannotated crop images alongside the annotated versions.
+</ParamField>
+
+<ParamField path="save_object_images" type="bool" default="false">
+  Save individual object crops as `<semantic_id>.jpg` files.
+</ParamField>
+
+<ParamField path="enable_selectframe_clip_features" type="bool" default="false">
+  Compute CLIP features on the frames selected by the assignment worker, in addition to (or instead of) per-frame features.
+</ParamField>
+
+<ParamField path="selectframe_clip_model_name" type="str" default="ViT-L-14">
+  CLIP model used for selectframe feature extraction. Larger than the perframe model to capture richer semantics.
+</ParamField>
+
+<ParamField path="selectframe_clip_model_dataset" type="str" default="openai">
+  Pre-training dataset for the selectframe CLIP model.
+</ParamField>
+
+<ParamField path="selectframe_clip_backend" type="str" default="openclip">
+  Backend for selectframe CLIP inference. Options:
+  - `"openclip"` — Standard OpenCLIP inference.
+  - `"pe"` — Perception Encoder backend (required for `PE-Core-L14-336` and similar models).
+</ParamField>
+
+---
+
+## Depth (`depth`)
+
+Filters depth measurements to a valid range before they are passed to the scene graph.
+
+<ParamField path="depth_lb" type="float" default="0.25">
+  Lower depth bound in meters. Readings below this value are treated as invalid.
+</ParamField>
+
+<ParamField path="depth_ub" type="float" default="5.0">
+  Upper depth bound in meters. Readings above this value are treated as invalid. Increase for large outdoor or warehouse scenes.
+</ParamField>
+
+---
+
+## Scene graph (`scene_graph`)
+
+Controls integration with the Hydra Dynamic Scene Graph service.
+
+<ParamField path="defer_dsg_processing" type="bool" default="false">
+  When `true`, scene graph updates are batched and applied at shutdown rather than inline. Improves real-time throughput at the cost of a longer shutdown phase.
+</ParamField>
+
+<ParamField path="enable_background_objects" type="bool" default="true">
+  When `true`, all tracked objects are retained in the scene graph, including those filtered by Hydra's semantic label rules.
+</ParamField>
+
+---
+
+## Top-level fields
+
+<ParamField path="semantic_config_path" type="str" default="config/labels_pseudo.yaml">
+  Path to the semantic label definitions YAML used to map label names to IDs.
+</ParamField>
+
+<ParamField path="labelspace_colors_path" type="str" default="config/labels_pseudo.csv">
+  Path to the CSV file mapping semantic labels to visualization colors.
+</ParamField>
+
+<ParamField path="hierarchical_optimization" type="bool" default="true">
+  Enable hierarchical label optimization when applying corrections to the scene graph.
+</ParamField>
+
+<ParamField path="output_dir" type="str" default="output">
+  Root directory where pipeline outputs — DSG JSON, correction files, and statistics — are written.
+</ParamField>
+
+---
+
+## Complete example
+
+The following snippet reflects the defaults used in `config/pipeline_config.yaml`:
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-x-640x480.engine"
+  model_config_path: "fastsam/fastsam_config.yaml"
+  device: "cuda"
+  min_mask_region_area: 300
+  polygon_epsilon_factor: 0.001
+  imgsz: [480, 640]
+
+tracking:
+  device: "cuda"
+  track_buffer: 30
+  enable_temporal_history: true
+  reid_weights: "checkpoints/reid_weights/clip_general.engine"
+  with_reid: true
+  reid_half: false
+
+grounding:
+  agent_model_name: "gpt-5-mini"
+  group_prompt_file: "config/prompt_templates/grounded_sam_prompt.txt"
+  query_interval_frames: 90
+  cuda_device: null
+  enable_perframe_clip_features: false
+  clip_feature_interval_frames: 5
+  perframe_clip_model_name: "ViT-B-16"
+  perframe_clip_model_dataset: "openai"
+
+workers:
+  num_assignment_workers: 1
+  num_grounding_workers: 1
+  assignment_worker: "min_frames_max_size"
+  grounding_worker: "dam_multi_image"
+  assignment_config:
+    min_obs_per_track: 8
+    N_masks_per_batch: 64
+    min_frame_margin_slack: 1
+    min_mask_region_area: 300
+    max_mask_region_area: 307200
+    position_score_weight: 0.5
+    size_score_weight: 0.5
+  dam_grounding_config:
+    dam_model_path: "nvidia/DAM-3B"
+    dam_conv_mode: "v1"
+    dam_prompt_mode: "focal_prompt"
+    multi_image_min_n_masks: 32
+    sentence_embedding_model_name: ""
+    compute_full_image_description: false
+    save_grounding_images: false
+    save_plain_grounding_images: false
+    save_object_images: false
+    enable_selectframe_clip_features: true
+    selectframe_clip_model_name: "ViT-L-14"
+    selectframe_clip_model_dataset: "openai"
+    selectframe_clip_backend: "openclip"
+
+depth:
+  depth_lb: 0.25
+  depth_ub: 5.0
+
+scene_graph:
+  defer_dsg_processing: true
+  enable_background_objects: true
+
+semantic_config_path: "config/labels_pseudo.yaml"
+labelspace_colors_path: "config/labels_pseudo.csv"
+hierarchical_optimization: true
+output_dir: "output"
+```

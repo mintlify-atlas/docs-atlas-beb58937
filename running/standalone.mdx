@@ -1,0 +1,77 @@
+---
+title: "Running DAAAM without ROS 2 (standalone mode)"
+description: "Use run_pipeline.py to run DAAAM on image sequences or CODa datasets directly from Python, without a ROS 2 environment or bag player."
+---
+
+DAAAM can run directly from Python without a ROS 2 environment using `scripts/run_pipeline.py`. This is useful when ROS 2 is not available or when you want to process offline datasets programmatically. The script supports `ImageSequenceDataset`, `CodaDataset`, and `HM3DSemDataset` loaders and always uses Hydra for scene graph construction.
+
+<Warning>
+  Standalone mode is less stable than the ROS 2 interface. The Hydra Python bindings used in this mode are less actively maintained. If you encounter errors, switch to the ROS 2 [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS) interface instead.
+</Warning>
+
+## Basic usage
+
+```bash
+python scripts/run_pipeline.py /path/to/dataset \
+  --dataset-type ImageSequenceDataset \
+  --fps 10 \
+  --output-dir output/my_run
+```
+
+## Example: CODa dataset
+
+To run on a CODa sequence with the `CodaDataset` loader:
+
+```bash
+python scripts/run_pipeline.py $CODA_ROOT_DIR \
+  --dataset-type CodaDataset \
+  --sequence 0 \
+  --hydra-config-path /path/to/daaam_ros/config/hydra_config/coda_dataset_khronos.yaml \
+  --sam-model fastsam/FastSAM-x-640x480.engine \
+  --depth-scale 1000.0 \
+  --fps 10 \
+  --output-dir output/coda_run
+```
+
+## CLI argument reference
+
+| Argument | Default | Description |
+|---|---|---|
+| `data_path` | *(required)* | Dataset path — a folder for image sequences, a file for rosbags |
+| `--config` | | Pipeline configuration YAML; uses built-in defaults if omitted |
+| `--config-overrides` | | Space-separated `key=value` overrides applied on top of the config (see note below) |
+| `--dataset-type` | `ImageSequenceDataset` | Dataset loader class: `ImageSequenceDataset`, `CodaDataset`, or `HM3DSemDataset` |
+| `--dataset-name` | | Dataset name used in output directory structure |
+| `--hydra-config-path` | *(path to default config)* | Path to the Hydra integration config YAML |
+| `--sam-model` | *(config value)* | SAM model path; accepts `.engine` (TensorRT) or `.pt` (PyTorch) |
+| `--agent-model-name` | *(config value)* | LLM model name for grounding (e.g. `gpt-5-mini`) |
+| `--sentence-embedding-model` | *(config value)* | Sentence embedding model name |
+| `--fps` | | Dataset framerate; omit to use the config value |
+| `--sequence` | | CODa sequence ID (e.g. `0`, `4`) — `CodaDataset` only |
+| `--camera-id` | | CODa camera ID (e.g. `cam0`, `cam1`) — `CodaDataset` only |
+| `--depth-source` | | CODa depth folder (`3d_raw_estimated`, `3d_raw`, `none`) — `CodaDataset` only |
+| `--depth-scale` | *(config value)* | Scale factor applied to raw depth values to convert them to meters |
+| `--depth-lb` | *(config value)* | Minimum valid depth in meters |
+| `--depth-ub` | *(config value)* | Maximum valid depth in meters |
+| `--max-frames` | | Maximum number of frames to process |
+| `--num-grounding-workers` | *(config value)* | Number of parallel grounding workers |
+| `--num-assignment-workers` | *(config value)* | Number of parallel assignment workers |
+| `--grounding-worker` | *(config value)* | Grounding backend (e.g. `dam_multi_image`) |
+| `--assignment-worker` | *(config value)* | Frame selection strategy (e.g. `min_frames_max_size`) |
+| `--query-interval-frames` | *(config value)* | Frames between successive grounding queries |
+| `--output-dir` | auto-generated | Output directory; defaults to `output/out_<timestamp>/` |
+| `--save-images` | `false` | Save segmentation visualization frames every `--save-interval` frames |
+| `--save-interval` | `100` | Save images every N frames when `--save-images` is set |
+| `--dry-run` | `false` | Load the config and dataset but do not run the pipeline |
+| `--verbose` | `false` | Enable verbose logging |
+| `--no-throttle` | `false` | Disable framerate throttling (overrides `--fps`) |
+
+<Note>
+  `--config-overrides` accepts one or more space-separated `key=value` strings that follow the dotted path to the field in `PipelineConfig`. For example:
+
+  ```bash
+  --config-overrides workers.num_grounding_workers=8 depth.depth_ub=30.0
+  ```
+
+  The override type is inferred from the current config value. If the current value is a bool, pass `true` or `false`. If it is an int or float, the string is cast automatically.
+</Note>

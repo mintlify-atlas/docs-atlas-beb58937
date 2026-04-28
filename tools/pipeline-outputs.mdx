@@ -1,0 +1,105 @@
+---
+title: "Understanding DAAAM pipeline output files and formats"
+description: "Reference for every file the DAAAM pipeline writes to disk, from the final scene graph JSON to per-frame timing statistics and grounding images."
+---
+
+When the pipeline finishes processing a sequence, it writes all results to a single output directory. By default that directory is `output/out_<timestamp>/` relative to your working directory, though you can override it with `--output-dir` when using the standalone script or the `scene` launch argument under ROS 2. Every run is self-contained — the directory holds the scene graph, semantic corrections, configuration snapshot, and performance data alongside any optional artifacts.
+
+## Output directory structure
+
+```
+output/out_<timestamp>/
+├── dsg.json
+├── corrections.yaml
+├── background_objects.yaml
+├── keyframe_annotations.yaml
+├── pipeline_config.yaml
+├── performance_statistics.csv
+├── grounding_images/          # optional
+└── logs/
+```
+
+## Core output files
+
+### dsg.json
+
+The final Dynamic Scene Graph serialised in Hydra's JSON format. The graph is hierarchical with three main object layers:
+
+- **Objects** — individual tracked instances with 3D positions, semantic labels, CLIP embeddings, and observation metadata.
+- **Places** — traversability nodes connecting objects to rooms.
+- **Rooms** — coarse spatial regions inferred from the place graph.
+
+You can load this file directly with `spark_dsg`:
+
+```python
+import spark_dsg as sdsg
+
+sg = sdsg.DynamicSceneGraph.load("output/out_<timestamp>/dsg.json")
+print(f"Loaded {sg.num_nodes()} nodes")
+```
+
+### corrections.yaml
+
+Records every semantic correction the pipeline applied, with full temporal history for each tracked object. Each entry contains:
+
+| Field | Description |
+|---|---|
+| `semantic_label` | Resolved semantic class name |
+| `confidence` | Grounding confidence score |
+| `frame_ids` | Frames at which the object was observed |
+| `timestamps` | Timestamps corresponding to each observation |
+| `observation_count` | Total number of observations |
+| `first_observed` | Timestamp of the first observation |
+| `last_observed` | Timestamp of the most recent observation |
+
+`postprocess_scene_graph.py` reads this file to build the label-to-embedding mapping when adding sentence features.
+
+### background_objects.yaml
+
+Objects detected by the pipeline but filtered out of the main Hydra DSG due to depth constraints. These are typically objects that fall outside the configured `depth_lb`/`depth_ub` range, sit outside the map bounds, or are otherwise rejected by Hydra's integration logic. The file preserves them so they can be reintegrated downstream — `postprocess_scene_graph.py` adds them as a `BACKGROUND_OBJECTS` layer in `dsg_updated.json`.
+
+### keyframe_annotations.yaml
+
+Per-keyframe annotation data capturing which frames were selected for grounding queries, which tracks were active, and what labels were assigned. Useful for debugging the assignment worker's frame selection decisions.
+
+### pipeline_config.yaml
+
+<Tip>
+  Keep this file alongside your results. It is the exact configuration that produced the run — hydra config path, model paths, depth bounds, worker settings, and every other parameter — making results fully reproducible without relying on external documentation.
+</Tip>
+
+A verbatim snapshot of the `PipelineConfig` used for the run, serialised to YAML. When comparing two runs or filing a bug report, this file tells you precisely what settings were active.
+
+### performance_statistics.csv
+
+<Note>
+  The CSV contains per-frame timing for each pipeline stage (segmentation, tracking, assignment, grounding, Hydra integration). Use it to identify bottlenecks before tuning worker counts or switching to TensorRT-accelerated models.
+</Note>
+
+One row per processed frame, with timing columns for every major pipeline stage. Columns include wall-clock durations in seconds for segmentation, tracking, assignment queue operations, grounding calls, and Hydra integration. Load it with pandas for quick analysis:
+
+```python
+import pandas as pd
+
+df = pd.read_csv("output/out_<timestamp>/performance_statistics.csv")
+print(df[["segmentation_time", "grounding_time", "hydra_time"]].describe())
+```
+
+### grounding_images/
+
+Saved visualisations of the grounding requests sent to DAM — bounding-box crops with their assigned labels overlaid. This directory is only created when `save_grounding_images: true` is set in the pipeline configuration. Images are named by frame index and track ID.
+
+### logs/
+
+Standard pipeline log files written by the Python logging framework. Each file corresponds to a pipeline run and contains timestamped INFO/WARNING/ERROR messages from all pipeline services.
+
+## Post-processing outputs
+
+After running `postprocess_scene_graph.py`, `cluster_places.launch.yaml`, and `summarize_regions.py` (see [Post-processing](/running/postprocessing)), the output directory gains additional files:
+
+| File | Description |
+|---|---|
+| `dsg_updated.json` | `dsg.json` with sentence embeddings added to all object nodes and `BACKGROUND_OBJECTS` layer integrated |
+| `clustered_dsg.json` | DSG after place-clustering groups places into semantic rooms |
+| `clustered_dsg_with_summaries.json` | `clustered_dsg.json` with LLM-generated natural-language summaries embedded in each room node |
+| `region_summaries.yaml` | Standalone YAML listing every room's label, description, and reasoning |

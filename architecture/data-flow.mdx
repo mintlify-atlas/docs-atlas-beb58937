@@ -1,0 +1,191 @@
+---
+title: "Data flow from raw frames to a labelled scene graph"
+description: "Step-by-step walkthrough from RGB-D input through segmentation, tracking, frame assignment, grounding, and scene-graph update to final disk output."
+---
+
+A single call to `PipelineOrchestrator.process_frame()` moves an RGB-D observation through five sequential stages. Expensive model inference (grounding) runs asynchronously in worker sub-processes so the main loop is never blocked waiting for language model results. The diagram and step-by-step walkthrough below describe the complete path from raw pixels to a labelled scene graph.
+
+## Pipeline diagram
+
+```
+RGB Frame
+  │
+  ▼
+┌──────────────────────┐
+│  SegmentationService  │  SAM / FastSAM / SAM2
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│    TrackingService    │  BotSort + CLIP ReID
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│   AssignmentService   │  Frame selection + mask assignment
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│   GroundingService    │  DAM / VLM → semantic labels
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│  SceneGraphService    │  Hydra DSG integration
+└──────────────────────┘
+```
+
+## Step-by-step walkthrough
+
+<Steps>
+
+<Step title="Input: RGB-D frames">
+Frames arrive either from ROS 2 topics (via the DAAAM-ROS node) or from a dataset loader (`DatasetConfig`). Each frame is wrapped in a `Frame` object:
+
+```python
+@dataclass
+class Frame:
+    frame_id: int
+    timestamp: float
+    rgb_image: np.ndarray           # H×W×3
+    depth_image: Optional[np.ndarray]  # H×W, metres
+    transform: Optional[np.ndarray]    # [x, y, z, qx, qy, qz, qw]
+    lin_vel: Optional[np.ndarray]   # [vx, vy, vz]
+    ang_vel: Optional[np.ndarray]   # [wx, wy, wz]
+    camera_intrinsics: Optional[Dict[str, float]]  # fx, fy, cx, cy
+    tracks: List[Track]             # filled by orchestrator during processing
+```
+
+The orchestrator assigns an incrementing `frame_id` before passing the frame into the pipeline.
+</Step>
+
+<Step title="Segmentation: per-pixel instance masks">
+`SegmentationService.segment(frame.rgb_image)` runs a SAM-family model and returns:
+
+- `dets` — `N×6` array of bounding boxes `[x1, y1, x2, y2, conf, cls]`
+- `masks` — list of `N` binary masks, one per detected instance
+
+Masks smaller than `segmentation.min_mask_region_area` or larger than `segmentation.max_mask_region_area` are discarded by the underlying `UniversalSegmenter` before being returned.
+
+A TensorRT warmup pass (`segmentation_service.warmup()`) is run once at startup to compile CUDA kernels and avoid latency spikes on the first real frame.
+</Step>
+
+<Step title="Tracking: temporal identity assignment">
+`TrackingService.update(dets, frame.rgb_image)` passes detections through BotSort with CLIP ReID. The tracker returns an `M×8` array:
+
+```
+[x1, y1, x2, y2, track_id, conf, cls, mask_idx]
+```
+
+`mask_idx` links each active track back to its entry in the `masks` list from the previous step. Track IDs are stable across frames; a track stays alive for `tracking.track_buffer` frames after its last detection.
+
+Each active track is converted into a `Track` object (polygon-compressed mask, bounding box, depth validity flag, velocity) and appended to `frame.tracks`.
+</Step>
+
+<Step title="Depth validation and 3D positioning">
+For each track the orchestrator computes the median depth over the mask pixels. A track is marked `depth_valid = False` and automatically assigned an `"unknown"` semantic label when:
+
+- fewer than 25 % of mask pixels have a valid depth reading, or
+- the median depth falls outside `[depth.depth_lb, depth.depth_ub]`.
+
+When depth and camera intrinsics are available, each track's 3D position is unprojected into camera space and optionally transformed to world coordinates using the frame's pose. These position observations accumulate in `object_3d_positions` and are forwarded to `SceneGraphService` every 100 frames.
+</Step>
+
+<Step title="Frame assignment: keyframe selection">
+Every `grounding.query_interval_frames` frames (default 60), the orchestrator serialises the recent-frames buffer into an `AssignmentTask` and puts it on `assignment_task_queue`. An assignment worker picks it up, selects the optimal keyframes, and returns `SelectedGroup` objects via `selected_groups_queue`.
+
+The **group processor thread** continuously drains `selected_groups_queue`. For each `SelectedGroup` it:
+1. Retrieves the corresponding `Frame` snapshot from `frame_snapshots`.
+2. Filters `frame.tracks` to only the tracks listed in the group.
+3. Wraps everything into a `PromptRecord` and places it on `query_group_queue`.
+4. Marks the track IDs as `prompted` to prevent re-queuing.
+
+```python
+@dataclass
+class PromptRecord:
+    frame: np.ndarray          # RGB keyframe
+    tracks: List[Track]        # tracks to ground
+    object_labels: Dict[int, int]
+    frame_id: int
+    timestamp: float
+```
+</Step>
+
+<Step title="Grounding: semantic labels and embeddings">
+Grounding workers drain `query_group_queue`. Each worker passes the RGB keyframe and masked crops through the Describe Anything Model (DAM), receiving a natural-language label for every track. A SentenceTransformers model (`sentence-t5-large` by default) then converts the label string to a dense embedding.
+
+Results are placed on `correction_queue` as `ObjectAnnotation` objects:
+
+```python
+# ObjectAnnotation fields relevant to the correction processor:
+semantic_id: int
+semantic_label: str           # e.g. "blue chair"
+confidence: float
+embedding: Optional[np.ndarray]            # sentence embedding
+selectframe_clip_feature: Optional[list]   # CLIP feature (if enabled)
+```
+</Step>
+
+<Step title="Temporal history enrichment">
+The **correction processor thread** drains `correction_queue`. Before storing each correction it calls `_enrich_correction_with_temporal_data()`, which attaches the full observation record from `semantic_temporal_history`:
+
+```python
+correction.frame_ids          # list of every frame_id where this object was seen
+correction.timestamps         # corresponding timestamps
+correction.observation_count  # total number of observations
+correction.first_observed     # timestamp of first observation
+correction.last_observed      # timestamp of most recent observation
+```
+
+This temporal metadata flows into `corrections.yaml` and into the DSG node's `metadata` field for downstream scene-understanding tasks.
+</Step>
+
+<Step title="Scene graph update">
+The enriched correction is passed to `SceneGraphService.store_correction()`, which:
+
+1. Stores the `ObjectAnnotation` in `self.corrections[semantic_id]`.
+2. On the next DSG update (from the ROS 2 node or at shutdown), calls `apply_corrections()` to write the label and embedding into the matching DSG object node's `metadata`.
+3. Identifies objects absent from Hydra's DSG and registers them in the `BACKGROUND_OBJECTS` layer so they are not silently dropped.
+
+If a correction carries the label `"unknown"`, the service triggers a re-prompting callback so the orchestrator removes that track from the prompted set and it will be grounded again in the next assignment interval.
+</Step>
+
+<Step title="Output: files written to disk">
+At shutdown `SceneGraphService.save_data(output_dir)` writes:
+
+| File | Contents |
+|---|---|
+| `dsg.json` | Final Hydra DSG state with all corrections applied |
+| `corrections.yaml` | Semantic labels, temporal history, and feature flags per object |
+| `background_objects.yaml` | Objects tracked by DAAAM but absent from Hydra's DSG |
+| `keyframe_annotations.yaml` | Image-level scene descriptions (if any) |
+| `clip_features.pkl` | Per-frame CLIP feature arrays (if `enable_perframe_clip_features` is true) |
+| `pipeline_config.yaml` | Snapshot of the config used for this run (for reproducibility) |
+| `performance_statistics.csv` | Per-stage timing data |
+
+All outputs land under `output/out_<timestamp>/` relative to the DAAAM root.
+</Step>
+
+</Steps>
+
+## Multiprocessing queues
+
+The pipeline uses four `mp.Queue` objects to connect the main process with worker sub-processes:
+
+| Queue | Direction | Contents |
+|---|---|---|
+| `assignment_task_queue` | orchestrator → assignment workers | Serialised `AssignmentTask` (JSON) |
+| `selected_groups_queue` | assignment workers → group processor thread | `List[SelectedGroup]` |
+| `query_group_queue` | group processor thread → grounding workers | `PromptRecord` |
+| `correction_queue` | grounding workers → correction processor thread | `ObjectAnnotation` |
+
+Queue sizes are bounded (100, 20, 50, 200 respectively). If `assignment_task_queue` is full when a new interval fires, the orchestrator logs a warning and skips that interval rather than blocking the main loop.
+
+## Thread model
+
+Three background threads run for the lifetime of the pipeline:
+
+| Thread | Purpose |
+|---|---|
+| **Group processor thread** | Drains `selected_groups_queue`, retrieves frame snapshots, and forwards `PromptRecord` objects to grounding workers |
+| **Correction processor thread** | Drains `correction_queue`, enriches corrections with temporal history, and calls `SceneGraphService.store_correction()` |
+| **Worker health monitor thread** | Polls worker process liveness every 5 seconds and logs dead workers |
+
+All three threads are started by `PipelineOrchestrator.start()` and joined (with timeouts) during the ordered shutdown sequence in `PipelineOrchestrator.stop()`.

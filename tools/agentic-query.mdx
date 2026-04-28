@@ -1,0 +1,85 @@
+---
+title: "Querying the DAAAM scene graph with LLM tool-calling"
+description: "Run an interactive REPL that lets you ask free-form natural-language questions about your scene using an OpenAI model and the DSG structure."
+---
+
+The agentic scene understanding feature turns your completed Dynamic Scene Graph into a question-answering interface. You type a natural-language question — "What objects are near the door?" or "Where is the chair?" — and a `SceneUnderstandingAgent` backed by an OpenAI model answers by calling structured tools over the scene graph rather than hallucinating from its training data. This gives you grounded, spatially accurate answers without writing any query code.
+
+## Prerequisites
+
+Before running the demo query script you need:
+
+- A completed and post-processed DSG at `dsg_updated.json`. Run `postprocess_scene_graph.py` first if you only have `dsg.json` — see [Post-processing](/running/postprocessing) for the full steps.
+- An OpenAI API key exported in your environment.
+- The `daaam` Python package installed (same environment used to run the pipeline).
+
+<Note>
+  The script reads `OPENAI_API_KEY` from your environment. Export it before running:
+
+  ```bash
+  export OPENAI_API_KEY=sk-...
+  ```
+</Note>
+
+## Running the demo
+
+```bash
+python scripts/demo_query.py \
+  --dsg-path output/my_run/dsg_updated.json \
+  --seq-id 0 \
+  --model-name gpt-5-mini
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--dsg-path` | yes | — | Path to `dsg_updated.json` produced by post-processing |
+| `--seq-id` | yes | — | CODa sequence ID used to look up sequence start times for temporal normalisation |
+| `--model-name` | no | `gpt-5-mini` | OpenAI model to use (`gpt-5-mini`, `gpt-4.1`, etc.) |
+
+## Using the REPL
+
+Once the scene graph loads, the script prints the node count and drops you into an interactive prompt:
+
+```
+Scene graph loaded (1842 nodes). Model: gpt-5-mini
+Type your question (empty line or Ctrl+C to quit).
+
+>
+```
+
+Type any free-form question and press Enter. The agent responds with an answer and its reasoning:
+
+```
+> What objects are near the door?
+
+Answer:    A trash can, a bicycle, and a fire hydrant are within 2 m of the door.
+Reasoning: Used get_objects_in_radius centred on the door node. Filtered to objects
+           with observation_count > 3 to reduce noise.
+
+> Where is the chair?
+
+Answer:    There are 3 chairs. The closest to the agent's last position is at (4.2, 1.1, 0.0).
+Reasoning: Called get_matching_subjects with query "chair", then sorted by distance
+           to the final agent trajectory waypoint.
+```
+
+Press Enter on an empty line or `Ctrl+C` to exit.
+
+## How it works
+
+The agent is configured with four tools that operate directly on the loaded `DynamicSceneGraph`:
+
+| Tool | What it does |
+|---|---|
+| `get_matching_subjects` | Semantic similarity search over object labels and embeddings |
+| `get_objects_in_radius` | Spatial query returning all objects within a given radius of a node |
+| `get_region_information` | Returns the label, description, and object list for a room node |
+| `get_agent_trajectory_information` | Returns the agent's observed trajectory waypoints |
+
+The model decides which tools to call and in what order, then synthesises a final answer and reasoning explanation from their outputs. No object positions or labels are baked into the prompt — everything comes from live tool calls against the graph.
+
+<Note>
+  `--seq-id` must match a sequence present in the internal `START_TIMES` lookup table. Valid IDs correspond to the CODa sequences included in the DAAAM evaluation set. If you see an `AssertionError: Unknown seq_id`, check which sequences your installation supports.
+</Note>

@@ -1,0 +1,212 @@
+---
+title: "A detailed look at the five DAAAM pipeline services"
+description: "Per-service breakdown of DAAAM's five pipeline stages — responsibilities, file paths, method signatures, and the config sections that control each one."
+---
+
+Each DAAAM service is a focused class that owns one stage of the pipeline. The `PipelineOrchestrator` in `src/daaam/pipeline/orchestrator.py` instantiates all five services at startup, wires them together through multiprocessing queues, and calls them in sequence for every incoming frame. The sections below describe what each service does, where to find its code, the methods you will interact with most, and which configuration keys govern its behaviour.
+
+<AccordionGroup>
+
+<Accordion title="SegmentationService">
+
+**Responsibility**: Run a SAM-family model on each RGB frame and return per-pixel binary instance masks alongside detection bounding boxes.
+
+**File**: `src/daaam/segmentation/services.py`
+
+**Key method**:
+
+```python
+def segment(self, frame: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """
+    Perform segmentation on an input frame.
+
+    Args:
+        frame: RGB image as a numpy array
+
+    Returns:
+        Tuple of (detection_boxes [N×6], segmentation_masks [N × H × W])
+    """
+```
+
+Detection boxes are shaped `[N, 6]` — `[x1, y1, x2, y2, conf, cls]` — matching the format expected by `TrackingService.update()`.
+
+The service delegates to a `UniversalSegmenterAdapter`, which wraps the `UniversalSegmenter` utility and selects the right backend (EfficientViT-SAM, SAM ViT, FastSAM, or SAM2) from the checkpoint name in config.
+
+**Supported models**:
+
+| Family | Example checkpoint names |
+|---|---|
+| EfficientViT-SAM | `efficientvit_sam_l0`, `efficientvit_sam_xl1` |
+| SAM ViT | `sam_vit_b`, `sam_vit_h`, `sam_vit_l` |
+| FastSAM | `FastSAM-s.pt`, `FastSAM-x.pt` (+ `.engine` TensorRT exports) |
+| SAM2 | `sam2.1_hiera_base_plus`, `sam2.1_hiera_large` |
+
+**Configuration section**: `segmentation`
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-s.pt"
+  model_config_path: "fastsam/fastsam_config.yaml"
+  device: null                 # null = auto-detect CUDA
+  min_mask_region_area: 300    # pixels — smaller masks are discarded
+  max_mask_region_area: 307200 # pixels — 640×480
+  polygon_epsilon_factor: 0.001
+  imgsz: null                  # [height, width] or null for auto
+```
+
+</Accordion>
+
+<Accordion title="TrackingService">
+
+**Responsibility**: Associate each new frame's detections with existing tracks so that every object carries a stable integer `track_id` across the video sequence.
+
+**File**: `src/daaam/tracking/services.py`
+
+**Key method**:
+
+```python
+def update(self, detections: np.ndarray, frame: np.ndarray) -> np.ndarray:
+    """
+    Update the tracker with new detections.
+
+    Args:
+        detections: N×6 array of [x1, y1, x2, y2, conf, cls]
+        frame: Current RGB frame (used for ReID feature extraction)
+
+    Returns:
+        M×8 array of [x1, y1, x2, y2, track_id, conf, cls, mask_idx]
+    """
+```
+
+The returned `mask_idx` column links each active track back to its entry in the mask list produced by `SegmentationService.segment()`.
+
+**Implementation**: `BotSortAdapter` wraps the [boxmot](https://github.com/mikel-brostrom/boxmot) `BotSort` tracker. CLIP-based ReID embeddings are used for track re-association, with weights loaded from `checkpoints/reid_weights/`.
+
+**Configuration section**: `tracking`
+
+```yaml
+tracking:
+  device: null
+  track_buffer: 30        # frames to keep a track alive after its last detection
+  enable_temporal_history: true
+  reid_weights: "checkpoints/reid_weights/clip_general.engine"
+  with_reid: true
+  reid_half: false        # keep false for CLIP models (FP32 required)
+```
+
+</Accordion>
+
+<Accordion title="AssignmentService">
+
+**Responsibility**: Periodically inspect the recent-frames buffer and decide which frames are the best keyframes to send for semantic grounding, and which tracks each keyframe should cover. This decouples the high-frequency tracking loop from the expensive grounding inference.
+
+**File**: `src/daaam/assignment/services.py`
+
+**How it works**: `AssignmentService.start()` spawns one or more worker sub-processes (selected by `workers.assignment_worker`). Each worker receives an `AssignmentTask` via `assignment_task_queue`, runs its frame-selection algorithm, and returns a list of `SelectedGroup` objects via `selected_groups_queue`. The orchestrator's group-processor thread picks up these results and forwards them to grounding workers.
+
+```python
+class AssignmentTask:
+    track_history: List[List[SimplifiedTrack]]  # recent frames × tracks per frame
+    frame_dims: Tuple[int, int]                 # (height, width)
+    object_labels: Dict[int, int]               # track_id → semantic_id
+    corrections: Dict[int, MinimalCorrection]   # already-labelled objects
+    prompted_track_ids: List[int]               # tracks already sent for grounding
+    start_frame_count: int                      # global ID of the first frame in history
+    frame_id_mapping: Dict[int, int]            # local buffer index → global frame ID
+
+class SelectedGroup:
+    global_frame_id: int       # which keyframe to use
+    track_ids: List[int]       # which tracks to ground in that frame
+```
+
+**Configuration section**: `workers` (see also [Workers](/architecture/workers))
+
+```yaml
+workers:
+  num_assignment_workers: 1
+  assignment_worker: "min_frames_max_size"   # "min_frames" | "min_frames_max_size"
+  assignment_config:
+    min_obs_per_track: 6
+    N_masks_per_batch: 64
+    min_frame_margin_slack: 1
+```
+
+</Accordion>
+
+<Accordion title="GroundingService">
+
+**Responsibility**: Run a vision-language model against each keyframe selected by `AssignmentService` to produce a semantic label and sentence embedding for every tracked object. Results are returned as `ObjectAnnotation` corrections that feed into `SceneGraphService`.
+
+**File**: `src/daaam/grounding/services.py`
+
+**How it works**: `GroundingService.start()` spawns grounding worker sub-processes (selected by `workers.grounding_worker`). Each worker receives a `PromptRecord` via `query_group_queue`, runs model inference, and places `ObjectAnnotation` objects on `correction_queue`. The orchestrator's correction-processor thread picks these up and passes them to `SceneGraphService.store_correction()`.
+
+```python
+class PromptRecord:
+    frame: np.ndarray              # RGB image for this keyframe
+    tracks: List[Track]            # tracks to ground in this frame
+    object_labels: Dict[int, int]  # track_id → semantic_id
+    frame_id: int
+    timestamp: float
+```
+
+**Configuration section**: `workers` (see also [Workers](/architecture/workers))
+
+```yaml
+workers:
+  num_grounding_workers: 4
+  grounding_worker: "dam_multi_image"
+  dam_grounding_config:
+    dam_model_path: "nvidia/DAM-3B"
+    dam_conv_mode: "v1"
+    dam_prompt_mode: "focal_prompt"
+    save_grounding_images: false
+    enable_selectframe_clip_features: false
+    selectframe_clip_model_name: "ViT-L-14"
+    selectframe_clip_backend: "openclip"
+```
+
+</Accordion>
+
+<Accordion title="SceneGraphService">
+
+**Responsibility**: Receive semantic corrections from grounding workers, apply them to the Hydra Dynamic Scene Graph (DSG), track objects that fall outside Hydra's field of view, and persist the final `dsg.json` and `corrections.yaml` to disk at shutdown.
+
+**File**: `src/daaam/scene_graph/services.py`
+
+**Key methods**:
+
+```python
+def store_correction(self, correction: Annotation) -> None:
+    """
+    Persist a grounding result.
+    - ObjectAnnotation → stored in self.corrections[semantic_id]
+    - ImageAnnotation  → stored in self.keyframe_annotations[timestamp]
+    If the correction label is 'unknown', triggers re-prompting via callback.
+    """
+
+def save_data(self, output_save_dir: Path) -> None:
+    """
+    Write pipeline outputs to disk:
+    - corrections.yaml      semantic labels + temporal history per object
+    - dsg.json              final Hydra DSG state
+    - background_objects.yaml  objects not present in Hydra's DSG
+    - keyframe_annotations.yaml  (if any image-level annotations exist)
+    """
+```
+
+The service integrates with Hydra through `update_scene_graph()` / `update_scene_graph_async()`, which accept serialised DSG binary data from the ROS 2 node. It maintains a `correction_lock` and a `scene_graph_lock` (reentrant) to make concurrent access safe across the correction-processor thread and the async DSG worker thread.
+
+**Background objects layer**: Objects that receive a semantic label from grounding but are filtered out by Hydra (e.g., outside the active map extent) are tracked in a `BACKGROUND_OBJECTS` layer appended to the DSG so they are not silently lost.
+
+**Configuration section**: `scene_graph`
+
+```yaml
+scene_graph:
+  defer_dsg_processing: false   # batch all DSG updates until shutdown
+  enable_background_objects: true
+```
+
+</Accordion>
+
+</AccordionGroup>

@@ -1,133 +1,61 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "DAAAM: Real-Time Spatio-Temporal Scene Understanding"
+description: "DAAAM combines SAM segmentation, BotSort tracking, and VLM grounding to build 4D Dynamic Scene Graphs for robot mapping in real time."
 ---
 
-## Setting up
+DAAAM (Describe Anything, Anywhere, at Any Moment) is a CVPR 2026 research system that brings foundation-model-first scene understanding to robots. It segments every frame with SAM, tracks objects temporally with BotSort and CLIP ReID, and queries the Describe Anything Model (DAM) to produce rich semantic labels — all fed into Hydra to build hierarchical 4D Dynamic Scene Graphs at real-time framerates.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="wrench" href="/installation">
+    Set up DAAAM with ROS 2, PyTorch, and all 17 workspace dependencies.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run the pipeline on the CODa dataset from end to end in a few commands.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture" icon="sitemap" href="/architecture/overview">
+    Understand the five-service modular design and how data flows through the pipeline.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Configuration" icon="sliders" href="/configuration/pipeline-config">
+    Tune segmentation, tracking, grounding, and worker settings via YAML.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What DAAAM does
 
-Everything you need to create world-class documentation.
+DAAAM processes RGB-D video streams and produces a continuously updated 4D Dynamic Scene Graph that captures **what** objects are, **where** they are in 3D space, and **when** they were observed — enabling downstream tasks like navigation, question answering, and agentic scene understanding.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Key concepts" icon="lightbulb" href="/concepts">
+    Learn about Dynamic Scene Graphs, the pipeline's core ideas, and benchmark results.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Running with ROS 2" icon="play" href="/running/ros2">
+    Launch DAAAM + Hydra together against a live bag or sensor stream.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Pipeline outputs" icon="folder-open" href="/tools/pipeline-outputs">
+    Understand the DSG JSON, corrections YAML, and performance statistics files.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Agentic scene query" icon="robot" href="/tools/agentic-query">
+    Ask free-form questions about the scene using LLM tool-calling over the DSG.
   </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## Pipeline at a glance
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Segment">
+    SAM / FastSAM / SAM2 produces per-pixel instance masks on every incoming RGB frame at up to real-time framerates, optionally accelerated with TensorRT.
+  </Step>
+  <Step title="Track">
+    BotSort with CLIP ReID maintains temporal identity across frames, accumulating observation history for each tracked object.
+  </Step>
+  <Step title="Assign & Ground">
+    The assignment worker selects optimal keyframes for each track and sends them to the DAM grounding worker, which returns natural-language semantic labels and embeddings.
+  </Step>
+  <Step title="Build the scene graph">
+    Semantic corrections flow into Hydra to produce a hierarchical 4D Dynamic Scene Graph with objects, places, and rooms — saved to `dsg.json`.
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Note>
+  DAAAM requires an NVIDIA GPU with at least 24 GB of VRAM and CUDA 12.x. See [Installation](/installation) for the full prerequisites.
+</Note>

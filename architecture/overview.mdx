@@ -1,0 +1,83 @@
+---
+title: "DAAAM's modular, service-oriented pipeline architecture"
+description: "How DAAAM organises its pipeline into loosely-coupled services, what the directory layout looks like, and where to explore each component."
+---
+
+DAAAM is structured as a set of loosely-coupled services coordinated by a central `PipelineOrchestrator`, a layout inspired by [Netflix/dispatch](https://github.com/Netflix/dispatch). Each service owns a single concern—segmentation, tracking, frame assignment, grounding, or scene-graph management—and communicates with its neighbours only through well-defined interfaces and multiprocessing queues. This keeps individual services independently testable and replaceable without touching the rest of the pipeline.
+
+## Directory layout
+
+The source tree under `src/daaam/` mirrors the service decomposition directly:
+
+```
+src/daaam/
+├── pipeline/
+│   ├── orchestrator.py   # PipelineOrchestrator — coordinates all services
+│   └── models.py         # Shared data models (Frame, PromptRecord, …)
+├── segmentation/         # SegmentationService
+├── tracking/             # TrackingService
+├── assignment/           # AssignmentService + pluggable workers
+│   └── workers/
+├── grounding/            # GroundingService + pluggable workers
+│   └── workers/
+├── scene_graph/          # SceneGraphService
+├── query_manager/        # MMLLM and DAM query handling
+│   ├── mmllm/
+│   └── dam/
+├── config.py             # PipelineConfig and all sub-configs
+└── utils/                # Shared utilities (logging, vision, geometry, …)
+```
+
+Supporting files live outside `src/`:
+
+```
+scripts/          # Pipeline runner, post-processing, visualisation, TensorRT export
+config/           # pipeline_config.yaml, label definitions, prompt templates
+checkpoints/      # Pre-trained model weights (SAM, FastSAM, SAM2, DAM, ReID)
+```
+
+The ROS 2 interface is a separate package at [MIT-SPARK/DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS).
+
+## The five core services
+
+| Service | File | Responsibility |
+|---|---|---|
+| **SegmentationService** | `segmentation/services.py` | Runs SAM / FastSAM / SAM2 to produce per-pixel instance masks |
+| **TrackingService** | `tracking/services.py` | Maintains temporal identity across frames using BotSort with CLIP ReID |
+| **AssignmentService** | `assignment/services.py` | Selects the optimal keyframes per track to send for grounding |
+| **GroundingService** | `grounding/services.py` | Runs DAM or VLM inference to produce semantic labels and embeddings |
+| **SceneGraphService** | `scene_graph/services.py` | Integrates corrections into the Hydra DSG and persists outputs |
+
+## Service file convention
+
+Every service package follows the same internal layout:
+
+| File | Contents |
+|---|---|
+| `<service>/services.py` | Main service class and business logic |
+| `<service>/models.py` | Data models specific to the service |
+| `<service>/schemas.py` | Serialisation schemas (JSON/dict helpers) |
+| `<service>/interfaces.py` | Abstract base classes for adapters and workers |
+
+This convention makes it straightforward to swap out a backend (for example, switching segmentation models) by implementing the interface in `interfaces.py` without changing the service class itself.
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Services" icon="layer-group" href="/architecture/services">
+    Detailed breakdown of each of the five pipeline services, including key method signatures and configuration sections.
+  </Card>
+  <Card title="Workers" icon="plug" href="/architecture/workers">
+    How pluggable assignment and grounding workers are selected at runtime and what configuration fields each worker exposes.
+  </Card>
+  <Card title="Data flow" icon="arrow-right-arrow-left" href="/architecture/data-flow">
+    Step-by-step walkthrough of how an RGB-D frame moves through segmentation, tracking, assignment, grounding, and scene-graph update.
+  </Card>
+  <Card title="Pipeline config" icon="sliders" href="/configuration/pipeline-config">
+    Full reference for `PipelineConfig` and every configuration section that controls the pipeline.
+  </Card>
+</CardGroup>
+
+<Note>
+The ROS 2 interface lives in a separate repository, [MIT-SPARK/DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS). The main ROS 2 node in `daaam_ros/src/daaam_ros/nodes/daaam_node.py` instantiates `PipelineOrchestrator` directly, so everything documented here applies equally when running under ROS 2.
+</Note>

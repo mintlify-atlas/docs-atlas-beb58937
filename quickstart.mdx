@@ -1,81 +1,220 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: Run DAAAM end to end on CODa sequence 0"
+description: "Download CODa data, create a ROS bag, launch the pipeline, post-process the scene graph, and visualize the Dynamic Scene Graph output."
 ---
 
-## Get started in three steps
+This guide walks you through the complete DAAAM workflow using the CODa outdoor driving dataset. By the end, you will have a Dynamic Scene Graph with semantic object labels, clustered places, and region summaries ready for visualization and agentic query.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Check prerequisites">
+    Before you begin, make sure you have a working DAAAM installation with ROS 2 Jazzy sourced and all workspace dependencies built. See [Installation](/installation) for the full setup guide.
 
-### Step 1: Set up your local environment
+    Source your workspace in every terminal you open:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    source ~/ros2_ws/install/setup.bash
+    ```
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Download CODa sequence 0">
+    Clone the CODa devkit and download sequence 0 (approximately 15 GB):
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    git clone git@github.com:ut-amrl/coda-devkit.git
+    cd coda-devkit
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    python scripts/download_split.py -d /path/to/CODa -t sequence -se 0
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    Set an environment variable for convenience — subsequent steps use it:
 
-### Step 3: Go live
+    ```bash
+    export CODA_ROOT_DIR=/path/to/CODa
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    After the download completes, your dataset directory will look like this:
 
-## Next steps
+    ```
+    CODa/
+    ├── 2d_rect/          # Rectified camera images
+    │   ├── cam0/
+    │   └── cam1/
+    ├── calibrations/     # Per-sequence intrinsics and extrinsics
+    ├── poses/
+    │   └── dense_global/ # Global pose estimates (used for TF)
+    └── timestamps/       # Per-sequence timestamp files
+    ```
+  </Step>
 
-Now that you have your docs running, explore these key features:
+  <Step title="Run depth estimation (optional)">
+    The CODa dataset does not ship pre-computed depth maps compatible with the DAAAM pipeline. Depth can be estimated from stereo disparity between `cam0` and `cam1` using [FoundationStereo](https://github.com/NVlabs/FoundationStereo).
+
+    ```bash
+    cd /path/to/FoundationStereo
+    pip install -r requirements.txt --no-build-isolation --no-deps
+    pip install xformers==0.0.33 --index-url https://download.pytorch.org/whl/cu128
+
+    python scripts/run_coda_depth_estimation.py \
+      --dataset_folder $CODA_ROOT_DIR \
+      --sequence_id 0
+    ```
+
+    This writes depth maps to `CODa/3d_raw_estimated/`, which the dataloader picks up via `depth_source:=3d_raw_estimated` in the next step.
+
+    Key arguments:
+
+    | Argument | Default | Description |
+    |---|---|---|
+    | `--dataset_folder` | *(required)* | Root path to the CODa dataset |
+    | `--sequence_id` | *(required)* | CODa sequence number |
+    | `--save_format` | `png` | Output format (`png` or `npz`) |
+    | `--depth_skip` | `1` | Process every N-th frame |
+    | `--batch_size` | `1` | Parallel rectification batch size |
+  </Step>
+
+  <Step title="Create a ROS bag from CODa data">
+    The dataloader node reads raw CODa files and records them as a ROS bag. This is the preferred way to feed data into the pipeline.
+
+    ```bash
+    source ~/ros2_ws/install/setup.bash
+
+    ros2 launch daaam_ros dataloader_coda_with_depth.launch.yaml \
+      sequence:=0 \
+      dataset_path:=${CODA_ROOT_DIR} \
+      bag_path:=${CODA_ROOT_DIR}/coda_0_with_depth.bag \
+      depth_source:=3d_raw_estimated
+    ```
+
+    <Tip>
+      The CODa bag publishes `/tf_static` with `TRANSIENT_LOCAL` durability, which can be missed by nodes that start after the bag. Create a QoS override file at `~/.tf_overrides.yaml` to work around this:
+
+      ```yaml
+      /tf_static: {depth: 1, durability: transient_local}
+      ```
+
+      Then export the override path before launching anything:
+
+      ```bash
+      export ROS_STATIC_TRANSFORM_BROADCASTER_QOS_OVERRIDES=~/.tf_overrides.yaml
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Launch DAAAM + Hydra">
+    Open a terminal and launch the full pipeline:
+
+    ```bash
+    # Terminal 1
+    source ~/ros2_ws/install/setup.bash
+    ros2 launch daaam_ros coda_daaam_hydra.launch.yaml scene:=coda_sequence_0
+    ```
+
+    Wait for all nodes to finish initializing before proceeding to the next step. Key launch arguments:
+
+    | Argument | Default | Description |
+    |---|---|---|
+    | `scene` | `coda_sequence_0` | Scene identifier used for output directory naming |
+    | `depth_scale` | `1000.0` | Depth image scale factor (mm → m) |
+    | `sam_model` | `fastsam/FastSAM-x-640x480.engine` | SAM model path (`.engine` or `.pt`) |
+    | `grounding_worker` | `dam_multi_image` | Grounding backend |
+    | `assignment_worker` | `min_frames_max_size` | Frame selection strategy |
+    | `query_interval_frames` | `120` | Frames between grounding queries |
+    | `min_obs_per_track` | `8` | Minimum observations before grounding a track |
+    | `exit_after_clock` | `true` | Shut down automatically when the bag finishes |
+  </Step>
+
+  <Step title="Play the bag">
+    In a second terminal, play the bag you recorded in step 4:
+
+    ```bash
+    # Terminal 2
+    ros2 bag play /path/to/CODa/coda_0_with_depth.bag \
+      --clock -p \
+      --qos-profile-overrides-path ~/.tf_overrides.yaml
+    ```
+
+    Press **space** to start playback once the bag is loaded.
+
+    <Warning>
+      You must pass both `--clock` and `--qos-profile-overrides-path ~/.tf_overrides.yaml`. Without `--clock`, timestamps will be wrong and the pipeline will not process data correctly. Without the QoS override, TF static transforms may be dropped by nodes that started after the bag.
+    </Warning>
+
+    When the bag finishes, the pipeline shuts down automatically (controlled by `exit_after_clock:=true`). Output files are written to `output/out_<timestamp>/` by default.
+  </Step>
+
+  <Step title="Post-process the scene graph">
+    Three post-processing steps enrich the raw pipeline output with sentence embeddings, clustered places, and region summaries.
+
+    **Sentence embeddings**
+
+    ```bash
+    python scripts/postprocess_scene_graph.py \
+      --data-dir output/my_run \
+      --sentence-model-name sentence-transformers/sentence-t5-xl
+    ```
+
+    This reads `dsg.json` from `--data-dir` and writes `dsg_updated.json` with sentence embeddings added to all object nodes. Skip this step if you set `sentence_embedding_model` in the launch file.
+
+    **Cluster places**
+
+    ```bash
+    ros2 launch daaam_ros cluster_places.launch.yaml \
+      data_dir:=/path/to/output/data/dir/
+    ```
+
+    Reads `dsg_updated.json` and writes `clustered_dsg.json` with semantically meaningful place clusters.
+
+    **Region summaries**
+
+    ```bash
+    export OPENAI_API_KEY=sk-...
+
+    python scripts/summarize_regions.py \
+      --data-dir output/my_run \
+      --model-name gpt-5-nano \
+      --n-samples 20
+    ```
+
+    Uses farthest-first sampling for semantic diversity within each region. Writes `region_summaries.yaml` and `clustered_dsg_with_summaries.json`.
+  </Step>
+
+  <Step title="Visualize the scene graph">
+    View the final scene graph with the Rerun-based static visualizer:
+
+    ```bash
+    python scripts/run_static_visualizer.py \
+      --dsg output/my_run/dsg_updated.json \
+      --color-map config/labels_pseudo.csv \
+      --spawn
+    ```
+
+    The `--spawn` flag opens the Rerun viewer automatically. Key arguments:
+
+    | Argument | Default | Description |
+    |---|---|---|
+    | `--dsg` | *(required)* | Path to the DSG JSON file |
+    | `--color-map` | `config/labels_pseudo.csv` | Label color map CSV |
+    | `--gt-dsgs` | | Ground truth DSG(s) for comparison |
+    | `--log-object-meshes` | `false` | Log individual object meshes |
+    | `--z-offset-objects` | `0.0` | Z offset for the object layer |
+    | `--z-offset-places` | `10.0` | Z offset for the places layer |
+    | `--z-offset-rooms` | `20.0` | Z offset for the rooms layer |
+  </Step>
+</Steps>
+
+## What's next?
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Running with ROS 2" icon="play" href="/running/ros2">
+    Explore all launch arguments and run the pipeline against a live sensor stream.
+  </Card>
+  <Card title="Running standalone" icon="terminal" href="/running/standalone">
+    Use the standalone script to run DAAAM without ROS 2 on image sequences or bags.
+  </Card>
+  <Card title="Pipeline outputs" icon="folder-open" href="/tools/pipeline-outputs">
+    Understand every file the pipeline writes: DSG, corrections, keyframe annotations, and more.
+  </Card>
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/overview">
+    Learn how the five services — segmentation, tracking, assignment, grounding, and scene graph — fit together.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

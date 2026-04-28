@@ -1,0 +1,150 @@
+---
+title: "Pluggable worker pattern for assignment and grounding"
+description: "How DAAAM's assignment and grounding workers are structured, which workers ship out of the box, and how to select and configure them at runtime."
+---
+
+DAAAM separates the decisions of *which frames to send for grounding* and *how to run grounding inference* into independent, pluggable worker processes. Both `AssignmentService` and `GroundingService` spawn a pool of Python `multiprocessing.Process` workers at startup; the specific worker implementation is chosen at runtime via a single config key. This makes it straightforward to swap algorithms or model backends without touching the orchestrator.
+
+<Note>
+Select workers through the `workers.assignment_worker` and `workers.grounding_worker` config keys in `config/pipeline_config.yaml`. The orchestrator calls `PipelineConfig.get_worker_config()` to pass the correct sub-configuration to each worker process.
+</Note>
+
+## Assignment workers
+
+Assignment workers live in `src/daaam/assignment/workers/`. They receive an `AssignmentTask` (containing the recent-frames buffer and current track state) and return a list of `SelectedGroup` objects that tell the orchestrator which keyframe to use and which tracks to ground in it.
+
+<AccordionGroup>
+
+<Accordion title="min_frames worker">
+
+**File**: `src/daaam/assignment/workers/min_frames.py`
+
+**Strategy**: Greedy set-cover minimisation. The worker iterates over frames and greedily selects the frame that covers the most uncovered qualified tracks, repeating until every qualified track appears in at least one selected frame. This is fast and requires no solver dependency.
+
+A track qualifies for grounding when:
+- it has been observed for at least `min_obs_per_track` frames,
+- its depth is valid (within `depth.depth_lb` … `depth.depth_ub`), and
+- it has not already been sent for grounding in a previous interval.
+
+```python
+# Example: selecting the worker in config
+workers:
+  assignment_worker: "min_frames"
+```
+
+</Accordion>
+
+<Accordion title="min_frames_max_size worker (default)">
+
+**File**: `src/daaam/assignment/workers/min_frames_max_size.py`
+
+**Strategy**: Mixed-integer program (MIP) solved by CVXPY. The worker first runs the greedy `min_frames` algorithm to obtain a lower bound on the number of required frames, then formulates a binary optimisation that minimises frame count subject to full track coverage, while maximising the *saliency* of each selected frame. Saliency is a weighted combination of:
+
+- **position score** — how centralised the track's bounding box is in the frame, and
+- **size score** — the normalised area of the track's mask.
+
+CVXPY is invoked with the GLPK or SCIPY solver. Because DAM inference is expensive, spending a few extra seconds finding a smaller, higher-quality frame set pays off in practice.
+
+```python
+# Saliency score weights (must sum to 1.0)
+workers:
+  assignment_worker: "min_frames_max_size"
+  assignment_config:
+    position_score_weight: 0.5
+    size_score_weight: 0.5
+```
+
+<Warning>
+`min_frames_max_size` requires `cvxpy` and either `glpk` or `scipy` to be installed. On large frame buffers the MIP can take tens of seconds. If solver latency becomes a bottleneck, switch to `min_frames`.
+</Warning>
+
+</Accordion>
+
+</AccordionGroup>
+
+### Assignment worker configuration
+
+All assignment workers share the fields in `AssignmentWorkerConfig`:
+
+```yaml
+workers:
+  assignment_config:
+    min_obs_per_track: 6        # minimum frames a track must appear in before grounding
+    N_masks_per_batch: 64       # maximum masks packed into a single grounding batch
+    min_frame_margin_slack: 1   # extra slack frames above the greedy minimum (MIP only)
+    min_mask_region_area: null  # override minimum mask area for assignment (pixels)
+    max_mask_region_area: null  # override maximum mask area for assignment (pixels)
+    position_score_weight: 0.5  # weight for centralisation score (MIP only)
+    size_score_weight: 0.5      # weight for mask-size score (MIP only)
+```
+
+## Grounding workers
+
+Grounding workers live in `src/daaam/grounding/workers/`. They receive a `PromptRecord` (RGB keyframe + selected tracks + semantic-ID mapping) and return `ObjectAnnotation` corrections via the `correction_queue`.
+
+<AccordionGroup>
+
+<Accordion title="dam_multi_image worker (default)">
+
+**File**: `src/daaam/grounding/workers/dam_grounding.py`
+
+**Backend**: [Describe Anything Model (DAM)](https://github.com/NVlabs/describe-anything) from NVIDIA. The worker runs DAM in multi-image batch mode: multiple cropped and masked object images are assembled into a single prompt, and DAM returns a short natural-language description for each object in one forward pass. Sentence embeddings are then computed with a SentenceTransformers model (default `sentence-t5-large`) and stored alongside the label.
+
+Optionally, the worker can extract per-keyframe CLIP features (`enable_selectframe_clip_features`) for downstream retrieval or visualisation.
+
+```python
+# Enable CLIP feature extraction alongside grounding
+workers:
+  grounding_worker: "dam_multi_image"
+  dam_grounding_config:
+    enable_selectframe_clip_features: true
+    selectframe_clip_model_name: "ViT-L-14"
+    selectframe_clip_backend: "openclip"   # "openclip" | "pe" (Perception Encoder)
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+### DAM grounding worker configuration
+
+```yaml
+workers:
+  dam_grounding_config:
+    dam_model_path: "nvidia/DAM-3B"
+    dam_conv_mode: "v1"
+    dam_prompt_mode: "focal_prompt"
+    multi_image_min_n_masks: null          # minimum masks to batch before inference
+    sentence_embedding_model_name: null    # override SentenceTransformers model
+    save_grounding_images: false           # save annotated keyframe images to output_dir
+    save_plain_grounding_images: false
+    save_object_images: false
+    enable_selectframe_clip_features: false
+    selectframe_clip_model_name: "ViT-L-14"
+    selectframe_clip_model_dataset: "openai"
+    selectframe_clip_backend: "openclip"  # "openclip" | "pe"
+```
+
+## Query managers
+
+Query managers in `src/daaam/query_manager/` handle model-specific prompt construction and response parsing on behalf of grounding workers:
+
+| Manager | File | Purpose |
+|---|---|---|
+| **MMLLM** | `query_manager/mmllm/services.py` | Multimodal LLM queries — supports GPT-4, Gemini, and compatible APIs |
+| **DAM** | `query_manager/dam/services.py` | DAM-specific prompt assembly and output parsing |
+
+## Worker health monitoring
+
+`WorkerHealthMonitor` (defined in `src/daaam/pipeline/orchestrator.py`) runs in a dedicated background thread and polls `AssignmentService.get_worker_health()` and `GroundingService.get_worker_health()` every five seconds. If a worker process is found dead it logs a warning with the process name and PID. You can query overall pipeline health at any time:
+
+```python
+health = orchestrator.get_health_status()
+# {
+#   "orchestrator": { "frame_count": 1200, "active_tracks": 14, ... },
+#   "assignment_service": { "running": true, "workers": [...] },
+#   "grounding_service":  { "running": true, "workers": [...] },
+#   "scene_graph_service": { "total_corrections": 11, ... },
+#   "worker_health": { "monitoring": true, "num_services": 2 }
+# }
+```

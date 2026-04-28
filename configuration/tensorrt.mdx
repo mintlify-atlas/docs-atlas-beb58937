@@ -1,0 +1,118 @@
+---
+title: "TensorRT acceleration for FastSAM and ReID"
+description: "Export FastSAM and BotSort CLIP ReID to TensorRT engine files, configure their paths in YAML, and understand GPU-specific rebuild requirements."
+---
+
+DAAAM supports optional TensorRT acceleration for the two most compute-intensive model stages: FastSAM segmentation and the CLIP-based BotSort ReID model. When engine files are present, the pipeline loads them directly instead of PyTorch weights, which significantly reduces per-frame latency at the cost of a one-time export step.
+
+<Warning>
+  TensorRT engine files are GPU-specific and TensorRT-version-specific. An engine compiled on one GPU will not run correctly on a different GPU architecture, and an engine compiled against one TensorRT version may fail to load after a TensorRT upgrade. Rebuild engines whenever you switch GPUs or update the TensorRT library.
+</Warning>
+
+---
+
+## Prerequisites
+
+Before exporting, confirm that the CUDA version used by your PyTorch installation matches the CUDA version that TensorRT was built against. A mismatch will produce silent accuracy errors or outright crashes at inference time.
+
+Check your PyTorch CUDA version:
+
+```bash
+python -c "import torch; print(torch.version.cuda)"
+```
+
+Check your TensorRT CUDA version:
+
+```bash
+python -c "import tensorrt; print(tensorrt.__version__)"
+```
+
+Both commands should report the same CUDA major version (e.g., `12.x`). If they differ, reinstall either PyTorch or TensorRT to align them before proceeding.
+
+<Note>
+  The `requirements.txt` pins `tensorrt-cu128` (CUDA 12.8). If your system runs a different CUDA version, update the `tensorrt-cuXX` package version in `requirements.txt` before installing.
+</Note>
+
+---
+
+## Exporting models
+
+### FastSAM
+
+Export the FastSAM-x model to a TensorRT engine file:
+
+```bash
+python scripts/export_fastsam_trt.py --model_name FastSAM-x
+```
+
+The script writes a `.engine` file to the `fastsam/` directory named after the model and the target resolution (e.g., `FastSAM-x-640x480.engine`).
+
+### BotSort ReID (vanilla CLIP)
+
+Export the CLIP-based ReID model used by BotSort:
+
+```bash
+python scripts/export_vanilla_clip_engine.py
+```
+
+The script writes the engine to `checkpoints/reid_weights/clip_general.engine`.
+
+---
+
+## Configuring engine paths
+
+After exporting, update `config/pipeline_config.yaml` to point to the engine files and set the required `imgsz` for the segmentation model:
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-x-640x480.engine"
+  imgsz: [480, 640]  # height, width — must match the resolution used during export
+
+tracking:
+  reid_weights: "checkpoints/reid_weights/clip_general.engine"
+  reid_half: false  # CLIP requires FP32
+```
+
+<Note>
+  The `imgsz` field is required for TensorRT engine files. Engine files are compiled for a fixed input resolution, and the pipeline will error at startup if this field is omitted or set to the wrong shape.
+</Note>
+
+---
+
+## Using `.pt` files without TensorRT
+
+If you do not want to use TensorRT, you can point `model_name` and `reid_weights` to standard PyTorch `.pt` files instead. The pipeline auto-detects the backend from the file extension — no other configuration changes are needed.
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-x.pt"
+  # imgsz can be omitted for .pt models
+
+tracking:
+  reid_weights: "checkpoints/reid_weights/osnet_x0_25_msmt17.pt"
+  reid_half: true
+```
+
+<Note>
+  The default launch files in [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS) are configured for `.engine` files. If you intend to run with `.pt` models, update the launch file parameters accordingly.
+</Note>
+
+---
+
+## Rebuilding engines
+
+<Steps>
+  <Step title="Re-export after switching GPUs">
+    Engines compiled on one GPU architecture (e.g., Ampere) will not work on another (e.g., Ada Lovelace). Run both export scripts again on the new machine.
+  </Step>
+  <Step title="Re-export after updating TensorRT">
+    A TensorRT update changes the serialization format. Attempting to load an old engine with a newer TensorRT version will produce a load error. Run both export scripts after any TensorRT upgrade.
+  </Step>
+  <Step title="Verify the CUDA version match">
+    Before re-exporting, confirm that PyTorch and TensorRT report the same CUDA version (see [Prerequisites](#prerequisites) above).
+  </Step>
+</Steps>
+
+<Tip>
+  Keep the original `.pt` files alongside your `.engine` files. If you need to switch machines quickly or debug a TensorRT issue, you can fall back to `.pt` inference by changing two lines in `pipeline_config.yaml` without re-running the export scripts.
+</Tip>

@@ -1,0 +1,162 @@
+---
+title: "Installing DAAAM with ROS 2, CUDA, and Dependencies"
+description: "Set up DAAAM on Ubuntu 24.04 with ROS 2 Jazzy, CUDA 12.x, and all 17 workspace dependencies using the automated installer or manual steps."
+---
+
+DAAAM runs on Ubuntu 24.04 with ROS 2 Jazzy and requires an NVIDIA GPU for real-time inference. The workspace pulls in 17 repositories — the automated installer handles all of them, or you can follow the manual steps below for a step-by-step setup.
+
+## Prerequisites
+
+| Requirement | Tested with |
+|---|---|
+| Ubuntu | 24.04 |
+| [ROS 2](https://docs.ros.org/en/jazzy/Installation.html) | Jazzy |
+| NVIDIA GPU (VRAM) | 24 GB+ |
+| CUDA | 12.x |
+| Python | 3.10+ (pyenv or system) |
+
+## Installation
+
+<Tabs>
+  <Tab title="Automated (recommended)">
+    The install script clones all 17 repos, installs system and rosdep dependencies, writes `colcon_defaults.yaml`, builds the C++ workspace, and runs `pip install` for the Python package.
+
+    ```bash
+    source /opt/ros/${ROS_DISTRO}/setup.bash
+    mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+    git clone git@github.com:MIT-SPARK/DAAAM.git daaam
+    bash daaam/install/install.sh
+    ```
+
+    Before running the script, verify that the `cu` suffix in `requirements.txt` matches your CUDA version (the default is `cu128` for CUDA 12.8).
+  </Tab>
+  <Tab title="Manual step-by-step">
+    If you prefer to control each step, run the following commands in order.
+
+    **1. Source ROS 2 and install system dependencies**
+
+    ```bash
+    source /opt/ros/${ROS_DISTRO}/setup.bash
+
+    sudo apt install python3-vcstool python3-tk libgoogle-glog-dev \
+      nlohmann-json3-dev glpk-utils libglpk-dev ros-dev-tools
+    ```
+
+    **2. Clone workspace repositories**
+
+    ```bash
+    cd ~/ros2_ws/src
+    vcs import . < daaam/install/packages.yaml --workers 1 --skip-existing
+    ```
+
+    **3. Install rosdep dependencies**
+
+    ```bash
+    rosdep install --from-paths . --ignore-src -r -y
+    ```
+
+    **4. Write colcon defaults**
+
+    ```bash
+    cat > ~/ros2_ws/colcon_defaults.yaml <<'YAML'
+    ---
+    build:
+      symlink-install: true
+      packages-skip: [khronos_msgs, khronos_ros, khronos_eval, hydra_multi_ros, spark_fast_lio, ouroboros_ros, ouroboros_msgs]
+      cmake-args:
+        - --no-warn-unused-cli
+        - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        - -DCONFIG_UTILS_ENABLE_ROS=OFF
+        - -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        - -DGTSAM_USE_SYSTEM_EIGEN=ON
+    YAML
+    ```
+
+    **5. Build the workspace**
+
+    ```bash
+    cd ~/ros2_ws
+    colcon build --continue-on-error
+    ```
+
+    <Note>
+      On machines with less than 16 GB of RAM, pass `-j2` to limit parallel jobs: `colcon build --continue-on-error --parallel-workers 2`. GTSAM in particular is RAM-hungry during compilation.
+    </Note>
+
+    **6. Install Python dependencies**
+
+    ```bash
+    cd ~/ros2_ws/src/daaam
+    pip install -r requirements.txt
+    pip install -e .
+    ```
+  </Tab>
+</Tabs>
+
+## Workspace repo map
+
+All repositories live side-by-side under `~/ros2_ws/src/`. The `daaam` and `daaam_ros` repos are the core packages; the remaining 15 are Hydra dependencies installed automatically.
+
+| Path | Repository | Branch | Notes |
+|---|---|---|---|
+| `daaam` | `MIT-SPARK/DAAAM` | `main` | Core library (this repo) |
+| `daaam_ros` | `MIT-SPARK/DAAAM-ROS` | `main` | ROS 2 interface |
+| `hydra` | `MIT-SPARK/Hydra` | `project/daaam` | 3D Dynamic Scene Graphs |
+| `hydra_ros` | `MIT-SPARK/Hydra-ROS` | `project/daaam` | Hydra ROS 2 wrapper |
+| `spark_dsg` | `MIT-SPARK/Spark-DSG` | `project/daaam` | Scene graph data structure |
+| `khronos` | `MIT-SPARK/Khronos` | `main` | Spatio-temporal reasoning |
+| `config_utilities` | `MIT-SPARK/config_utilities` | `main` | SPARK config helpers |
+| `ianvs` | `MIT-SPARK/Ianvs` | `main` | SPARK utilities |
+| `kimera_pgmo` | `MIT-SPARK/Kimera-PGMO` | `ros2` | Mesh optimization |
+| `kimera_rpgo` | `MIT-SPARK/Kimera-RPGO` | `develop` | Robust PGO |
+| `pose_graph_tools` | `MIT-SPARK/pose_graph_tools` | `ros2` | Pose graph messages |
+| `semantic_inference` | `MIT-SPARK/semantic_inference` | `main` | Semantic segmentation |
+| `spatial_hash` | `MIT-SPARK/Spatial-Hash` | `main` | Spatial indexing |
+| `teaser_plusplus` | `MIT-SPARK/TEASER-plusplus` | `master` | Point cloud registration |
+| `gtsam` | `borglab/gtsam` | `release/4.2` | Factor graphs |
+| `small_gicp` | `koide3/small_gicp` | `master` | Fast ICP |
+| `vision_opencv` | `ros-perception/vision_opencv` | `rolling` | cv_bridge for ROS 2 |
+
+## Optional: TensorRT acceleration
+
+FastSAM and the BotSort ReID model can be exported to TensorRT `.engine` files for real-time inference. Engine files are GPU-specific and TensorRT-version-specific — rebuild them whenever you switch GPUs or update TensorRT.
+
+<Warning>
+  The PyTorch CUDA version and the TensorRT CUDA version **must match**. If PyTorch is installed with `cu128`, TensorRT must use the same CUDA version. If you are using a CUDA version other than 12.x or do not intend to use TRT acceleration, adjust the `tensorrt-cuXX` version in `requirements.txt`.
+</Warning>
+
+**Export the FastSAM TensorRT model**
+
+```bash
+python scripts/export_fastsam_trt.py --model_name FastSAM-x
+```
+
+**Export the BotSort ReID (vanilla CLIP) TensorRT model**
+
+```bash
+python scripts/export_vanilla_clip_engine.py
+```
+
+**Set engine paths in the launch file or `config/pipeline_config.yaml`**
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-x-640x480.engine"
+  imgsz: [480, 640]
+
+tracking:
+  reid_weights: "checkpoints/reid_weights/clip_general.engine"
+```
+
+When using `.pt` files instead, the code auto-detects the backend from the file extension — no other configuration changes are needed.
+
+## Optional: GLPK for assignment optimization
+
+The `min_frames_max_size` assignment worker uses CVXPY to solve a mixed-integer program and requires the GLPK solver.
+
+```bash
+sudo apt install glpk-utils libglpk-dev
+pip install cvxopt   # provides cp.GLPK_MI to CVXPY
+```
+
+If `GLPK_MI` is unavailable at runtime, the worker falls back to `cp.SCIPY` (`scipy.optimize.milp`). Note that `scipy >= 1.15.0` ships HiGHS 1.8, which regresses significantly on this problem structure — solve times are 5–7× slower than `scipy 1.14.x`. Pin `scipy<1.15` if GLPK is not an option.

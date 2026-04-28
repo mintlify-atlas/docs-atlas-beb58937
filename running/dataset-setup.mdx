@@ -1,0 +1,141 @@
+---
+title: "Downloading and preparing the CODa dataset"
+description: "Clone coda-devkit, download a sequence, estimate depth with FoundationStereo, and record a ROS bag for use with the DAAAM pipeline."
+---
+
+The DAAAM pipeline is validated against the CODa outdoor robot dataset. This page walks you through downloading a sequence, optionally estimating stereo depth, and recording a ROS bag that the pipeline can replay.
+
+## Downloading CODa
+
+Clone the coda-devkit and use its download script to pull a sequence. Sequence 0 is approximately 15 GB.
+
+```bash
+git clone git@github.com:ut-amrl/coda-devkit.git
+cd coda-devkit
+
+# Download sequence 0 (≈15 GB)
+python scripts/download_split.py -d /path/to/CODa -t sequence -se 0
+```
+
+The devkit also provides pre-defined splits if you want a smaller or larger portion of the dataset:
+
+| Split | Description |
+|---|---|
+| `tiny` | Minimal subset for quick tests |
+| `small` | Small multi-sequence sample |
+| `medium` | Medium-size evaluation set |
+| `full` | Complete dataset |
+
+Pass the split name to `-t` instead of `sequence` to download one of these predefined subsets. See the coda-devkit README for details.
+
+## Setting the dataset root
+
+Export `CODA_ROOT_DIR` so you can reference it in later commands without repeating the full path:
+
+```bash
+export CODA_ROOT_DIR=/path/to/CODa
+```
+
+## Expected directory structure
+
+After downloading sequence 0, your dataset directory should look like this:
+
+```
+CODa/
+├── 2d_rect/          # Rectified camera images
+│   ├── cam0/
+│   │   └── <seq>/    # Numbered frames: 000000.png, 000001.png, ...
+│   └── cam1/
+├── 3d_raw/           # DO NOT USE — depth is in a different reference frame
+│   ├── cam0/
+│   └── cam0_undist/
+├── calibrations/     # Per-sequence camera intrinsics & extrinsics
+│   └── <seq>/
+├── poses/
+│   └── dense_global/ # Global pose estimates (used for TF)
+└── timestamps/       # Per-sequence timestamp files
+```
+
+<Warning>
+  Do not use `3d_raw/` for depth. That directory contains depth in a different reference frame and is not compatible with the DAAAM pipeline. Use `3d_raw_estimated/` produced by the depth estimation step below instead.
+</Warning>
+
+## Depth estimation (optional)
+
+For the CODa dataset, depth is estimated from stereo disparity between `cam0` and `cam1`. DAAAM was benchmarked using [FoundationStereo](https://github.com/NVlabs/FoundationStereo) for this estimation step. The custom script `run_coda_depth_estimation.py` is available in the [nicogorlo/FoundationStereo fork](https://github.com/nicogorlo/FoundationStereo/blob/master/scripts/run_coda_depth_estimation.py).
+
+```bash
+cd /path/to/FoundationStereo
+pip install -r requirements.txt --no-build-isolation --no-deps
+pip install xformers==0.0.33 --index-url https://download.pytorch.org/whl/cu128
+
+python scripts/run_coda_depth_estimation.py \
+  --dataset_folder $CODA_ROOT_DIR \
+  --sequence_id 0
+```
+
+The script writes depth maps to `CODa/3d_raw_estimated/`, which is the default depth source used in the dataloader step below.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--dataset_folder` | *(required)* | Root path to CODa dataset |
+| `--sequence_id` | *(required)* | CODa sequence number |
+| `--save_format` | `png` | Output format: `png` or `npz` |
+| `--depth_skip` | `1` | Process every N-th frame |
+| `--batch_size` | `1` | Parallel rectification batch size |
+
+## Creating ROS bags
+
+The dataloader node reads raw CODa files and publishes them as ROS topics, optionally recording to a bag. Creating a bag is the preferred approach — it lets you replay the data as many times as needed without re-running the dataloader.
+
+```bash
+source ~/ros2_ws/install/setup.bash
+
+ros2 launch daaam_ros dataloader_coda_with_depth.launch.yaml \
+  sequence:=0 \
+  dataset_path:=${CODA_ROOT_DIR} \
+  bag_path:=${CODA_ROOT_DIR}/coda_0_with_depth.bag \
+  depth_source:=3d_raw_estimated
+```
+
+### Launch arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `sequence` | `0` | CODa sequence number |
+| `dataset_path` | `/path/to/coda/data/` | Root of the CODa dataset |
+| `bag_path` | auto-generated | Output `.bag` path |
+| `depth_source` | `3d_raw_estimated` | Depth source directory name |
+| `framerate` | `1000.0` | Playback rate (Hz) |
+| `start_frame` | `0` | First frame index |
+| `end_frame` | `-1` | Last frame index (`-1` = all frames) |
+| `stride` | `1` | Frame stride |
+
+### Published ROS topics
+
+The dataloader publishes the following topics. Images are resized to 640×480 (crop-resize, preserving aspect ratio) by default.
+
+| Topic | Type |
+|---|---|
+| `/coda/cam0/rgb_image` | `sensor_msgs/Image` |
+| `/coda/cam0/depth_image` | `sensor_msgs/Image` |
+| `/coda/cam0/camera_info` | `sensor_msgs/CameraInfo` |
+| `/tf` | Pose transforms |
+
+## TF override workaround
+
+The CODa bag publishes `/tf_static` with `TRANSIENT_LOCAL` durability. Nodes that start after the bag may miss this message. To avoid dropped transforms, create a QoS override file at `~/.tf_overrides.yaml`:
+
+```yaml
+/tf_static: {depth: 1, durability: transient_local}
+```
+
+Then export the path before launching any DAAAM nodes:
+
+```bash
+export ROS_STATIC_TRANSFORM_BROADCASTER_QOS_OVERRIDES=~/.tf_overrides.yaml
+```
+
+<Note>
+  The `--qos-profile-overrides-path` flag in the bag play command (see [Running with ROS 2](/running/ros2)) also uses this file. Make sure you create it before playing back the bag.
+</Note>

@@ -1,0 +1,72 @@
+---
+title: "Running DAAAM with ROS 2 against a CODa bag"
+description: "Launch DAAAM and Hydra in one terminal, play a CODa ROS bag in a second terminal, and collect DSG results with all launch arguments explained."
+---
+
+The recommended way to run DAAAM is through ROS 2. The pipeline is split into two terminals: one that launches DAAAM and Hydra, and a second that replays the pre-recorded CODa bag. This lets you tune launch parameters without re-running the dataloader each time.
+
+## Prerequisites
+
+Before continuing, make sure you have:
+
+- A working DAAAM ROS 2 workspace — see [Installation](/installation)
+- A recorded CODa ROS bag — see [Dataset setup](/running/dataset-setup)
+
+## Two-terminal launch workflow
+
+<Steps>
+  <Step title="Launch DAAAM + Hydra">
+    In your first terminal, source the workspace and launch the pipeline:
+
+    ```bash
+    source ~/ros2_ws/install/setup.bash
+    ros2 launch daaam_ros coda_daaam_hydra.launch.yaml scene:=coda_sequence_0
+    ```
+
+    Wait for the node to finish loading before moving to the next step. You will see log output indicating that the workers and segmentation model are ready.
+  </Step>
+
+  <Step title="Play the bag">
+    In a second terminal, replay the CODa bag with clock simulation and QoS overrides enabled:
+
+    ```bash
+    ros2 bag play /path/to/CODa/coda_0_with_depth.bag \
+      --clock \
+      -p \
+      --qos-profile-overrides-path ~/.tf_overrides.yaml
+    ```
+
+    The bag will pause at the start. Press **space** to begin playback once everything has loaded.
+  </Step>
+</Steps>
+
+<Warning>
+  You must pass both `--clock` and `--qos-profile-overrides-path ~/.tf_overrides.yaml` when playing the bag. Without `--clock`, timestamps will not match the pipeline's expectations. Without the QoS overrides, nodes started after the bag may miss `/tf_static` and lose tracking of the camera frame. See [Dataset setup — TF override workaround](/running/dataset-setup#tf-override-workaround) for how to create `~/.tf_overrides.yaml`.
+</Warning>
+
+<Tip>
+  After launching the bag, it pauses at the first frame. Press **space** to start playback. This gives you time to confirm all nodes are healthy in the first terminal before data starts flowing.
+</Tip>
+
+## Launch arguments
+
+The `coda_daaam_hydra.launch.yaml` file accepts the following arguments. Pass them as `key:=value` after the launch file name.
+
+| Argument | Default | Description |
+|---|---|---|
+| `scene` | `coda_sequence_0` | Scene identifier used for output directory naming |
+| `depth_scale` | `1000.0` | Depth image scale factor converting raw values to meters (mm → m) |
+| `sam_model` | `fastsam/FastSAM-x-640x480.engine` | SAM model path; accepts `.engine` (TensorRT) or `.pt` (PyTorch) |
+| `sam_imgsz` | `480,640` | SAM input resolution as `H,W` |
+| `grounding_worker` | `dam_multi_image` | Grounding backend to use |
+| `assignment_worker` | `min_frames_max_size` | Frame selection strategy for grounding |
+| `num_grounding_workers` | `1` | Number of parallel grounding workers |
+| `query_interval_frames` | `120` | Frames between successive grounding queries |
+| `min_obs_per_track` | `8` | Minimum observations before a track is sent for grounding |
+| `depth_lb` | `0.05` | Minimum valid depth in meters |
+| `depth_ub` | `20.0` | Maximum valid depth in meters |
+| `exit_after_clock` | `true` | Shut down automatically when the bag finishes |
+
+## Pipeline outputs
+
+When the bag finishes playing, DAAAM writes its results to `output/coda_sequence_0/` (or the directory derived from the `scene` argument). See [Pipeline outputs](/tools/pipeline-outputs) for a description of every file produced.

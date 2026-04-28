@@ -1,0 +1,145 @@
+---
+title: "Supported segmentation, grounding, and tracking models"
+description: "Segmentation backbones, grounding LLMs, ReID weights, and CLIP models supported by DAAAM — with checkpoint paths and config keys that select each model."
+---
+
+DAAAM is designed around interchangeable model backbones. Each pipeline stage — segmentation, tracking, grounding, and feature extraction — selects its model through the configuration file, and the backend is inferred automatically from the file extension or model name. The sections below document every supported model, where checkpoints live, and which config keys to update.
+
+<Note>
+  All model checkpoints are stored relative to the project root under `checkpoints/`. The directory structure must match the paths set in your `pipeline_config.yaml`. See the [pipeline configuration reference](/configuration/pipeline-config) for the relevant fields.
+</Note>
+
+---
+
+## Segmentation models
+
+The `segmentation.model_name` field selects the backbone. DAAAM supports four model families.
+
+| Family | Model names | Notes |
+|---|---|---|
+| **EfficientViT** | `efficientvit_sam_l0`, `efficientvit_sam_l1`, `efficientvit_sam_l2`, `efficientvit_sam_xl0`, `efficientvit_sam_xl1` | Lightweight SAM variants optimized for speed |
+| **SAM** | `sam_vit_b`, `sam_vit_l`, `sam_vit_h` | Original Segment Anything Model; `vit_h` is largest and most accurate |
+| **FastSAM** | `fastsam/FastSAM-s.pt`, `fastsam/FastSAM-x.pt` | YOLOv8-based fast segmentation; also accepts TensorRT `.engine` exports |
+| **SAM2** | `sam2.1_hiera_base_plus`, `sam2.1_hiera_large`, and other SAM2 variants | Meta's second-generation SAM with video-aware tracking |
+
+The model backend is inferred from the path suffix:
+
+- `.pt` → PyTorch inference
+- `.engine` → TensorRT inference (requires `imgsz` to be set; see [TensorRT acceleration](/configuration/tensorrt))
+
+```yaml
+segmentation:
+  model_name: "fastsam/FastSAM-x-640x480.engine"
+  imgsz: [480, 640]  # required for engine files
+```
+
+---
+
+## Grounding models
+
+### DAM (Describe Anything Model)
+
+The primary grounding backend is the NVIDIA Describe Anything Model (DAM), loaded via the `dam_multi_image` worker.
+
+| Field | Value |
+|---|---|
+| `dam_grounding_config.dam_model_path` | `nvidia/DAM-3B` (Hugging Face ID or local path) |
+| Worker | `dam_multi_image` |
+| Prompt mode | `focal_prompt` — focuses attention on the masked region |
+
+DAM produces free-form natural-language descriptions for each detected object, which are then embedded by the sentence embedding model and stored on the scene graph node.
+
+### Multimodal LLMs (MMLLM)
+
+The grounding agent LLM is configured via `grounding.agent_model_name` and routed through LangChain. Any model string supported by the installed LangChain providers works here.
+
+| Provider | Example model names |
+|---|---|
+| OpenAI | `gpt-4.1`, `gpt-5-mini`, `gpt-4o` |
+| Google | `gemini-2.0-flash`, `gemini-pro` |
+| Anthropic | `claude-3-5-sonnet-20241022`, `claude-opus-4` |
+
+```yaml
+grounding:
+  agent_model_name: "gpt-5-mini"
+```
+
+---
+
+## Sentence embedding models
+
+Semantic labels produced by DAM are embedded into a vector space for downstream NaVQA retrieval. Any model compatible with the SentenceTransformers library can be used.
+
+| Field | Default |
+|---|---|
+| `grounding.sentence_embedding_model` | `sentence-transformers/sentence-t5-large` |
+
+The model is identified by its Hugging Face model ID. At runtime it is downloaded automatically on first use. The embeddings are stored on each scene graph node and used to answer free-form natural language queries about the scene.
+
+---
+
+## ReID models
+
+The BotSort tracker uses a ReID model to maintain identity across occlusions. The model is set via `tracking.reid_weights`.
+
+| Checkpoint | Use case | Precision |
+|---|---|---|
+| `checkpoints/reid_weights/clip_general.engine` | General objects (default) | FP32 required — set `reid_half: false` |
+| `checkpoints/reid_weights/osnet_x0_25_msmt17.pt` | Person tracking | FP16 compatible — set `reid_half: true` |
+
+`clip_general.engine` is a TensorRT export of a CLIP vision encoder fine-tuned for object re-identification. Because CLIP uses layer normalization that is sensitive to precision, it must be run in FP32 (`reid_half: false`).
+
+```yaml
+tracking:
+  reid_weights: "checkpoints/reid_weights/clip_general.engine"
+  reid_half: false  # CLIP requires FP32
+```
+
+<Tip>
+  To use `osnet_x0_25_msmt17.pt` for person-centric scenes, change `reid_weights` to the osnet path and set `reid_half: true` for faster inference.
+</Tip>
+
+---
+
+## CLIP feature extraction
+
+DAAAM extracts CLIP visual features at two points in the pipeline:
+
+### Per-frame CLIP features
+
+Extracted every `clip_feature_interval_frames` frames from the incoming video stream and attached to each active track.
+
+| Field | Default |
+|---|---|
+| `grounding.perframe_clip_model_name` | `ViT-B-16` |
+| `grounding.perframe_clip_model_dataset` | `openai` |
+| `grounding.enable_perframe_clip_features` | `true` |
+| `grounding.clip_feature_interval_frames` | `5` |
+
+### Selectframe CLIP features
+
+Extracted on the keyframes chosen by the assignment worker — typically higher-quality frames chosen for saliency — using a larger model than the per-frame extractor.
+
+| Field | Default |
+|---|---|
+| `dam_grounding_config.selectframe_clip_model_name` | `ViT-L-14` |
+| `dam_grounding_config.selectframe_clip_model_dataset` | `openai` |
+| `dam_grounding_config.selectframe_clip_backend` | `openclip` |
+| `dam_grounding_config.enable_selectframe_clip_features` | `false` |
+
+Two backends are supported via `selectframe_clip_backend`:
+
+- `"openclip"` — Standard OpenCLIP inference, compatible with all ViT checkpoints.
+- `"pe"` — Perception Encoder backend, required for models like `PE-Core-L14-336`.
+
+```yaml
+dam_grounding_config:
+  enable_selectframe_clip_features: true
+  selectframe_clip_model_name: "ViT-L-14"
+  selectframe_clip_model_dataset: "openai"
+  selectframe_clip_backend: "openclip"
+```
+
+<Tip>
+  TensorRT engine files are compiled for a specific GPU architecture and TensorRT version. If you move your checkpoint directory to a different machine or update TensorRT, you must re-export the engines. See [TensorRT acceleration](/configuration/tensorrt) for export instructions.
+</Tip>

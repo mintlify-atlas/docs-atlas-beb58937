@@ -1,0 +1,99 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "DAAAM",
+  "projectDescription": "DAAAM (Describe Anything, Anywhere, at Any Moment) is a real-time foundation-model-first robot mapping system that combines SAM segmentation, BotSort tracking, and VLM grounding to build 4D Dynamic Scene Graphs on the fly.",
+  "theme": "aspen",
+  "primaryColor": "#912d37",
+  "lightColor": "#776f67",
+  "darkColor": "#d3cfcc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "concepts"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Running the Pipeline",
+            "pages": [
+              "running/dataset-setup",
+              "running/ros2",
+              "running/standalone",
+              "running/postprocessing",
+              "running/visualization"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/services",
+              "architecture/workers",
+              "architecture/data-flow"
+            ]
+          },
+          {
+            "group": "Configuration & Models",
+            "pages": [
+              "configuration/pipeline-config",
+              "configuration/models",
+              "configuration/tensorrt"
+            ]
+          },
+          {
+            "group": "Tools & Outputs",
+            "pages": [
+              "tools/pipeline-outputs",
+              "tools/agentic-query",
+              "tools/scripts"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Real-time SAM/FastSAM/SAM2 segmentation with TensorRT acceleration",
+    "BotSort temporal tracking with CLIP ReID for cross-frame object consistency",
+    "Describe Anything Model (DAM) grounding for semantic object labeling",
+    "Hierarchical 4D Dynamic Scene Graph construction via Hydra integration",
+    "Optimization-based frame assignment (CVXPY MIP) for efficient grounding",
+    "ROS 2 interface for live robot data streams",
+    "Agentic scene understanding with LLM tool-calling over the scene graph",
+    "State-of-the-art performance on NaVQA and SG3D benchmarks"
+  ],
+  "publicApiSurface": [
+    "PipelineOrchestrator(config: PipelineConfig)",
+    "PipelineOrchestrator.process_frame(frame: Frame) -> Tuple[np.ndarray, np.ndarray]",
+    "PipelineOrchestrator.start()",
+    "PipelineOrchestrator.stop()",
+    "PipelineOrchestrator.set_semantic_update_callback(callback)",
+    "PipelineOrchestrator.get_health_status() -> Dict",
+    "PipelineConfig.from_yaml(path: str) -> PipelineConfig",
+    "PipelineConfig.to_yaml(path: str)",
+    "SegmentationService",
+    "TrackingService",
+    "AssignmentService",
+    "GroundingService",
+    "SceneGraphService",
+    "scripts/run_pipeline.py",
+    "scripts/postprocess_scene_graph.py",
+    "scripts/summarize_regions.py",
+    "scripts/run_static_visualizer.py",
+    "scripts/demo_query.py",
+    "scripts/export_fastsam_trt.py",
+    "scripts/export_vanilla_clip_engine.py"
+  ]
+}

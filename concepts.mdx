@@ -1,0 +1,91 @@
+---
+title: "Core concepts: Dynamic Scene Graphs and pipeline"
+description: "Learn how DAAAM uses 4D Dynamic Scene Graphs, foundation model segmentation and grounding, spatio-temporal memory, and how it performs on NaVQA and SG3D."
+---
+
+This page explains the ideas that underpin DAAAM: how it represents scenes as hierarchical 4D graphs, how it uses foundation models to segment and label objects in real time, how it maintains a memory of observations over time, and what benchmark results validate the approach. Reading this page will help you understand why the pipeline is structured the way it is and how each component contributes to the final scene graph.
+
+## Dynamic Scene Graphs (DSG)
+
+A Dynamic Scene Graph is a hierarchical, spatially grounded graph that organizes a scene into a set of nested layers. DAAAM builds and updates this graph continuously as new frames arrive.
+
+### Hierarchical structure
+
+The graph contains three semantic layers:
+
+- **Objects** — individual tracked instances with 3D position, bounding box, semantic label, and observation history.
+- **Places** — spatial regions derived from traversable free space, grouping nearby objects.
+- **Rooms** — higher-level areas inferred from the place topology.
+
+This hierarchy is built by [Hydra](https://github.com/MIT-SPARK/Hydra), MIT-SPARK's incremental 3D scene graph framework. DAAAM acts as the semantic frontend: it produces per-object labels and embeddings and feeds them into Hydra as *corrections*.
+
+### 4D: adding time
+
+The "4D" qualifier means the graph is spatio-temporal — each object node carries a full observation history recording which frames it appeared in and at what timestamps. This enables downstream tasks that require knowing not just where something is, but *when* it was there, such as change detection or temporally grounded question answering.
+
+<Info>
+  Temporal history tracking is controlled by the `tracking.enable_temporal_history` configuration flag. When enabled, the orchestrator records `(frame_id, timestamp)` pairs for every tracked object and enriches each semantic correction with this data before storing it in the DSG.
+</Info>
+
+### Integration with Hydra
+
+DAAAM does not build the DSG from scratch. It extends Hydra by providing semantic *corrections* — structured updates that map a numeric semantic ID (assigned by the orchestrator's label space) to a natural-language label, a confidence score, an optional task-relevance score, and the object's full temporal and spatial observation history. Hydra merges these corrections with its geometric reconstruction to produce the final graph.
+
+## Foundation model pipeline
+
+DAAAM is designed around a "foundation-model-first" principle: rather than training task-specific detectors, it chains together large pre-trained models and connects them with a lightweight optimization layer.
+
+### Segmentation — SAM
+
+The segmentation service runs a SAM variant (SAM, SAM2, FastSAM, or EfficientViT-SAM) on every incoming RGB frame to produce per-pixel instance masks. Each mask defines one candidate object. SAM is run in automatic mask generation mode, so no prompts or class labels are needed.
+
+<Tip>
+  FastSAM with TensorRT export offers the best throughput for real-time use. See [Configuration: models](/configuration/models) for how to select and export a segmentation model.
+</Tip>
+
+### Tracking — BotSort with CLIP ReID
+
+The tracking service wraps BotSort and adds CLIP-based re-identification (ReID) to maintain consistent track IDs across frames — even when objects are briefly occluded or leave and re-enter the field of view. Each track accumulates a depth history that the orchestrator uses to validate whether the object is within the configured depth range before querying for a semantic label.
+
+### Assignment — frame selection
+
+Rather than grounding every frame, DAAAM selects an optimal subset of keyframes at each query interval. The assignment workers solve a mixed-integer program (CVXPY) that minimizes the number of selected frames while ensuring every active track is covered at least once and that selected frames maximize object saliency. This keeps the grounding load manageable while maintaining label quality.
+
+### Grounding — DAM
+
+The grounding service queries the Describe Anything Model (DAM) with each selected keyframe and its associated cropped regions. DAM returns a natural-language description for each object, which is parsed into a semantic label and a text embedding. The embedding is stored alongside the label in the correction and later used by the scene graph for similarity-based reasoning.
+
+<Note>
+  DAAAM also supports multimodal LLM backends (GPT, Gemini) through the `mmllm` query manager, configurable via `config/pipeline_config.yaml`. DAM is the default and recommended backend for offline use.
+</Note>
+
+## Spatio-temporal memory
+
+DAAAM maintains a running memory of each object's presence in the scene through two complementary mechanisms.
+
+### Temporal observation history
+
+For every tracked object, the orchestrator records a list of `(frame_id, timestamp)` pairs in `semantic_temporal_history`. When a grounding correction arrives, it is *enriched* with this history before being written to the DSG — providing downstream consumers with `frame_ids`, `timestamps`, `observation_count`, `first_observed`, and `last_observed` fields on each object node.
+
+Track closures are detected when a track has not been seen for longer than the tracker's configured `track_buffer`. At closure, the temporal history is deduplicated and frozen, and a pending temporal update is queued for the scene graph service.
+
+### 3D position tracking
+
+In parallel with temporal tracking, the orchestrator projects each detected mask centroid into 3D world coordinates (using depth and camera intrinsics) and accumulates position observations per object in `object_3d_positions`. These are sent to the scene graph service incrementally every 100 frames, providing Hydra with a position history that supports the background objects layer.
+
+## Benchmarks
+
+DAAAM achieves state-of-the-art results on two established benchmarks for scene-graph-based scene understanding.
+
+<AccordionGroup>
+  <Accordion title="NaVQA">
+    NaVQA evaluates a system's ability to answer natural-language questions about a scene using the scene graph as the knowledge source. DAAAM's combination of rich semantic labels (from DAM), spatio-temporal observation history, and hierarchical graph structure enables it to answer questions that require both spatial and temporal reasoning — achieving state-of-the-art results on this benchmark.
+  </Accordion>
+  <Accordion title="SG3D">
+    SG3D is a benchmark for 3D scene graph generation quality, measuring how accurately a system identifies objects and their relationships in 3D space. DAAAM's optimization-based frame selection and high-quality DAM grounding produce object labels that match or exceed prior methods, yielding state-of-the-art 3D scene graph quality on SG3D.
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+  Full quantitative results and ablation tables are available in the DAAAM paper: [arXiv:2512.00565](https://arxiv.org/abs/2512.00565).
+</Info>

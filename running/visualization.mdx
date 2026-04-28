@@ -1,0 +1,80 @@
+---
+title: "Visualizing the scene graph with Rerun"
+description: "Use the static Rerun-based visualizer to inspect objects, places, and rooms in a completed DSG, with optional ground truth overlay for evaluation."
+---
+
+DAAAM includes a static visualizer built on [Rerun](https://rerun.io/) that renders the three layers of a completed Dynamic Scene Graph — objects, places, and rooms — each offset vertically so they can be inspected independently in 3D space. The visualizer can also overlay one or more ground truth DSGs for qualitative evaluation.
+
+## Prerequisites
+
+Before running the visualizer, make sure you have:
+
+- `rerun-sdk` installed in your Python environment (`pip install rerun-sdk`)
+- A completed DSG file — `dsg_updated.json` from the [post-processing step](/running/postprocessing), or `clustered_dsg_with_summaries.json` if you have run all post-processing steps
+
+## Running the visualizer
+
+```bash
+python scripts/run_static_visualizer.py \
+  --dsg output/my_run/dsg_updated.json \
+  --color-map config/labels_pseudo.csv \
+  --spawn
+```
+
+By default, `--spawn` is enabled so the Rerun viewer opens automatically. The script keeps running until you press **Ctrl+C**.
+
+## Argument reference
+
+| Argument | Default | Description |
+|---|---|---|
+| `--dsg` | *(required)* | Path to the DSG JSON file to visualize |
+| `--color-map` | `config/labels_pseudo.csv` | CSV file mapping semantic labels to RGB colors |
+| `--gt-dsgs` | | Path to a ground truth DSG JSON file or directory for comparison overlay |
+| `--log-object-meshes` | `false` | Log individual object bounding-box meshes (slower but richer) |
+| `--spawn` / `--no-spawn` | `--spawn` | Open the Rerun viewer automatically; use `--no-spawn` to log without launching the viewer |
+| `--z-offset-objects` | `0.0` | Z offset in meters applied to the objects layer |
+| `--z-offset-places` | `10.0` | Z offset in meters applied to the places / traversability layer |
+| `--z-offset-rooms` | `20.0` | Z offset in meters applied to the rooms layer |
+| `--z-offset-buildings` | `40.0` | Z offset in meters applied to the buildings layer |
+| `--z-offset-gt` | `0.0` | Z offset in meters applied to ground truth objects |
+| `--interlayer-edge-subsample` | `1` | Show every N-th interlayer edge; increase to reduce visual clutter |
+| `--object-subsample-grid-size` | `null` | Spatial grid size in meters for downsampling dense object layers |
+| `--log-regions-separately` | `false` | Log each room and its traversability nodes to separate Rerun paths for independent coloring |
+
+## Layer separation with z-offsets
+
+The visualizer stacks the three DSG layers at different heights so you can see each one without occlusion. The default offsets place objects at ground level (z = 0 m), places 10 m above (z = 10 m), and rooms 20 m above (z = 20 m).
+
+<CardGroup cols={3}>
+  <Card title="Objects layer" icon="cube">
+    Rendered at `z = 0 m` by default. Each object node is shown at its 3D centroid with a colored bounding box.
+  </Card>
+  <Card title="Places layer" icon="map">
+    Rendered at `z = 10 m` by default. Shows traversability nodes and interlayer edges connecting places to the objects below.
+  </Card>
+  <Card title="Rooms layer" icon="building">
+    Rendered at `z = 20 m` by default. Shows clustered room nodes with summary labels if region summaries have been generated.
+  </Card>
+</CardGroup>
+
+You can adjust all three offsets independently. For example, to compress the layers closer together:
+
+```bash
+python scripts/run_static_visualizer.py \
+  --dsg output/my_run/dsg_updated.json \
+  --z-offset-places 3.0 \
+  --z-offset-rooms 6.0
+```
+
+## Ground truth comparison
+
+<Tip>
+  Pass `--gt-dsgs` with a path to a ground truth DSG file to overlay it on the visualization. Ground truth objects are rendered in a distinct color at z = 0 m alongside your pipeline's output, making it easy to spot missed or incorrect detections at a glance.
+</Tip>
+
+```bash
+python scripts/run_static_visualizer.py \
+  --dsg output/my_run/clustered_dsg_with_summaries.json \
+  --gt-dsgs /path/to/ground_truth_dsg.json \
+  --color-map config/labels_pseudo.csv
+```

@@ -1,0 +1,57 @@
+---
+title: "DAAAM: Real-time robot scene understanding"
+description: "DAAAM is a CVPR 2026 system from MIT-SPARK that builds 4D Dynamic Scene Graphs in real time using SAM, BotSort, and the Describe Anything Model."
+---
+
+DAAAM (Describe Anything, Anywhere, at Any Moment) is a CVPR 2026 research system from MIT-SPARK that gives robots real-time spatio-temporal scene understanding. It feeds every RGB frame through SAM segmentation, BotSort temporal tracking, and DAM semantic grounding, then integrates the results into Hydra to produce hierarchical 4D Dynamic Scene Graphs — capturing what objects are, where they are in 3D space, and when they were seen, all at real-time framerates.
+
+## Key contributions
+
+DAAAM introduces three core advances over prior scene graph systems:
+
+- **Novel optimization-based frontend** — a frame-selection and assignment pipeline that minimizes the number of frames queried while maximizing object saliency, using CVXPY mixed-integer programming under the hood.
+- **Hierarchical 4D scene graph construction** — objects, places, and rooms organized in a multi-layer graph with full spatio-temporal history, built on the Hydra DSG framework.
+- **State-of-the-art benchmark results** — top performance on the NaVQA and SG3D benchmarks for scene-graph-based navigation and question answering.
+
+## Paper and citation
+
+DAAAM was published as a CVPR 2026 paper. If you use this code in your work, please cite:
+
+Nicolas Gorlo, Lukas Schmid, and Luca Carlone, "**Describe Anything, Anywhere, at Any Moment**". *arXiv preprint arXiv:2512.00565*, 2025.
+
+```bibtex
+@article{Gorlo2025DAAAM,
+      title={Describe Anything Anywhere At Any Moment},
+      author={Nicolas Gorlo and Lukas Schmid and Luca Carlone},
+      year={2025},
+      eprint={2512.00565},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2512.00565}
+}
+```
+
+<Note>
+  This work was supported by the ARL DCIST program and the ONR RAPID program.
+</Note>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="wrench" href="/installation">
+    Set up DAAAM, its Python dependencies, and model checkpoints.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run the pipeline end to end on the CODa dataset in a few commands.
+  </Card>
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/overview">
+    Understand the five-service modular design and the data flow through the pipeline.
+  </Card>
+  <Card title="Running with ROS 2" icon="play" href="/running/ros2">
+    Launch DAAAM against a live sensor stream or bag file using DAAAM-ROS.
+  </Card>
+</CardGroup>
+
+<Info>
+  The ROS 2 interface is maintained as a separate package. See [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS) on GitHub for installation and launch instructions.
+</Info>
